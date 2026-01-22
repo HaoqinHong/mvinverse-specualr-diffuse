@@ -1,12 +1,10 @@
 <h1 align="center">MVInverse: Feed-forward Multi-view Inverse Rendering in Seconds</h1>
 
 <p align="center">
-    <a href="https://arxiv.org/abs/2512.21003" target="_blank">
-    <img src="https://img.shields.io/badge/Paper-00AEEF?style=plastic&logo=arxiv&logoColor=white" alt="Paper">
-    </a>
-    <a href="https://maddog241.github.io/mvinverse-page/" target="_blank">
-    <img src="https://img.shields.io/badge/Project Page-F78100?style=plastic&logo=google-chrome&logoColor=white" alt="Project Page">
-    </a>
+    <a href="https://arxiv.org/abs/2512.21003" target="_blank"><img src="https://img.shields.io/badge/arXiv-Paper-b31b1b.svg" alt="arXiv"></a>
+    <a href="https://maddog241.github.io/mvinverse-page/" target="_blank"><img src="https://img.shields.io/badge/Project-Page-orange" alt="Project Page"></a>
+    <a href="https://huggingface.co/spaces/maddog241/mvinverse-demo" target="_blank"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-yellow" alt="HF Demo"></a>
+    <a href="https://huggingface.co/maddog241/mvinverse" target="_blank"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Model-blue" alt="HF Model"></a>
 </p>
 
 <div align="center">
