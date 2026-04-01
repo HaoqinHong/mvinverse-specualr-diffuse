@@ -24,3 +24,14 @@ ckpts
 resize_demo_imgs.py
 img_dir_to_video.py
 zip_*
+/output*
+eval.py
+eval_test/
+inference_cg.py
+inference_dl3dv.py
+metrics/
+pi3/
+release_weight.py
+/training/logs
+/datasets
+/commands.sh

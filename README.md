@@ -18,7 +18,8 @@
 
 
 ## 🔔 Updates
-* **[December 24, 2025]** Inference code release.
+* **[April 1, 2026]** ✨ Training code release, please see [Training Guide](training/README.md).
+* **[December 24, 2025]** 🚀 Inference code release.
 
 
 ## 🌟 Overview
@@ -52,6 +53,10 @@ Arguments:
   * `save_path`: Directory where the output images will be saved. 
   * `num_frames`: Number of frames to process. Set to -1 to process all images in the directory. 
   * `device`: Device to run inference on (cuda or cpu). 
+
+## Training 
+
+Please see [Training Guide](training/README.md)
 
 ## 🙏 Acknowledgements
 
