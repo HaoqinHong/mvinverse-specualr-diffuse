@@ -46,8 +46,33 @@ def linear_to_srgb_tensor(linear: torch.Tensor) -> torch.Tensor:
     """
     Linear RGB -> sRGB (approx. gamma 2.2)
     """
+    # 训练内部很多材质图采用 linear 空间；
+    # 保存 PNG 或做可视化时转到更接近人眼显示的 sRGB 空间。
     linear = torch.clamp(linear, 0.0, 1.0)
     return linear ** (1 / 2.2)
+
+
+def compute_masked_psnr(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, eps: float = 1e-8) -> Optional[torch.Tensor]:
+    """
+    Compute PSNR over valid pixels only.
+
+    Args:
+        pred: [B, N, H, W, C]
+        target: [B, N, H, W, C]
+        mask: [B, N, H, W]
+    """
+    if mask.dtype != torch.bool:
+        mask = mask.bool()
+
+    valid = mask.unsqueeze(-1)
+    valid_count = valid.sum()
+    if valid_count.item() == 0:
+        return None
+
+    denom = valid.sum().clamp_min(1) * pred.shape[-1]
+    mse = ((pred - target) ** 2 * valid).sum() / denom
+    psnr = -10.0 * torch.log10(mse.clamp_min(eps))
+    return psnr
 
 class Trainer:
     """
@@ -60,6 +85,15 @@ class Trainer:
     - Executing the main training and validation loops.
     - Logging metrics and visualizations to TensorBoard.
     """
+    # 一个 epoch / step 的主流程可以概括为：
+    # 1. 初始化分布式、模型、loss、优化器、数据集
+    # 2. 训练时从 dataset 动态采样多视图 batch
+    # 3. forward -> loss -> backward -> optimizer step
+    # 4. 周期性保存 checkpoint、跑验证、写 TensorBoard
+    #
+    # 这份 Trainer 明显是为“动态多视图训练”设计的：
+    # batch["images"] 的常见形状是 [B, N, C, H, W]，
+    # B 是场景数，N 是每个场景采到的视图数。
 
     EPSILON = 1e-8
 
@@ -110,7 +144,7 @@ class Trainer:
         self._setup_env_variables(env_variables)
         self._setup_timers()
 
-        # Store Hydra configurations
+        # 保存 Hydra 配置对象，后续 instantiate / 日志 / checkpoint 都会用到。
         self.data_conf = data
         self.model_conf = model
         self.loss_conf = loss
@@ -118,7 +152,7 @@ class Trainer:
         self.checkpoint_conf = checkpoint
         self.optim_conf = optim
 
-        # Store hyperparameters
+        # 训练超参数与运行态标量。
         self.accum_steps = accum_steps
         self.max_epochs = max_epochs
         self.mode = mode
@@ -127,13 +161,15 @@ class Trainer:
         self.limit_val_batches = limit_val_batches
         self.seed_value = seed_value
         
-        # 'where' tracks training progress from 0.0 to 1.0 for schedulers
+        # where 用于 scheduler，表示“当前整体训练进度”在 [0, 1] 的哪个位置。
         self.where = 0.0
+        self.best_psnr = float("-inf")
+        self.best_psnr_epoch = -1
 
         self._setup_device(device)
         self._setup_torch_dist_and_backend(cuda, distributed)
 
-        # Setup logging directory and configure logger
+        # 日志目录和 logger 必须尽早初始化，后面很多地方都会写日志。
         safe_makedirs(self.logging_conf.log_dir)
         setup_logging(
             __name__,
@@ -147,19 +183,19 @@ class Trainer:
 
         assert is_dist_avail_and_initialized(), "Torch distributed needs to be initialized before calling the trainer."
 
-        # Instantiate components (model, loss, etc.)
+        # 先建核心组件，再建 dataloader。
         self._setup_components()
         self._setup_dataloaders()
 
-        # Move model to the correct device
+        # 模型先搬到 device，再构造 optimizer，避免参数对象不一致。
         self.model.to(self.device)
         self.time_elapsed_meter = DurationMeter("Time Elapsed", self.device, ":.4f")
 
-        # Construct optimizers (after moving model to device)
+        # optimizer 必须在 model.to(device) 之后构造。
         if self.mode != "val":
             self.optims = construct_optimizers(self.model, self.optim_conf)
 
-        # Load checkpoint if available or specified
+        # 优先使用显式指定的 resume_checkpoint_path，否则尝试从 save_dir 自动恢复。
         if self.checkpoint_conf.resume_checkpoint_path is not None:
             self._load_resuming_checkpoint(self.checkpoint_conf.resume_checkpoint_path)
         else:   
@@ -167,10 +203,10 @@ class Trainer:
             if ckpt_path is not None:
                 self._load_resuming_checkpoint(ckpt_path)
 
-        # Wrap the model with DDP
+        # 最后一步再包 DDP，这样前面的权重加载和冻结逻辑都作用在原始模块上。
         self._setup_ddp_distributed_training(distributed, device)
         
-        # Barrier to ensure all processes are synchronized before starting
+        # 所有 rank 对齐后再正式开始训练/验证。
         dist.barrier()
 
     def _setup_timers(self):
@@ -183,18 +219,19 @@ class Trainer:
         if env_variables_conf:
             for variable_name, value in env_variables_conf.items():
                 os.environ[variable_name] = value
+        # 打印完整环境，调 Docker / CUDA / NCCL / Hydra 问题时很有帮助。
         logging.info(f"Environment:\n{json.dumps(dict(os.environ), sort_keys=True, indent=2)}")
 
     def _setup_torch_dist_and_backend(self, cuda_conf: Dict, distributed_conf: Dict) -> None:
         """Initializes the distributed process group and configures PyTorch backends."""
         if torch.cuda.is_available():
-            # Configure CUDA backend settings for performance
+            # 这些 backend 开关主要在“速度”和“可复现性”之间做平衡。
             torch.backends.cudnn.deterministic = cuda_conf.cudnn_deterministic
             torch.backends.cudnn.benchmark = cuda_conf.cudnn_benchmark
             torch.backends.cuda.matmul.allow_tf32 = cuda_conf.allow_tf32
             torch.backends.cudnn.allow_tf32 = cuda_conf.allow_tf32
 
-        # Initialize the DDP process group
+        # 初始化 DDP 通信进程组；后面所有 rank 间同步都依赖这里。
         dist.init_process_group(
             backend=distributed_conf.backend,
             timeout=timedelta(minutes=distributed_conf.timeout_mins)
@@ -212,7 +249,8 @@ class Trainer:
             with g_pathmgr.open(ckpt_path, "rb") as f:
                 checkpoint = torch.load(f, map_location="cpu")
         
-        # Load model state
+        # strict=False 时，允许“部分加载”：
+        # 能对上的权重加载进来，对不上的通过 missing / unexpected 报告出来。
         model_state_dict = checkpoint["model"] if "model" in checkpoint else checkpoint
         missing, unexpected = self.model.load_state_dict(
             model_state_dict, strict=self.checkpoint_conf.strict
@@ -220,7 +258,7 @@ class Trainer:
         if self.rank == 0:
             logging.info(f"Model state loaded. \n Missing keys: {missing or 'None'}.\n Unexpected keys: {unexpected or 'None'}.")
 
-        # Load optimizer state if available and in training mode
+        # 如果 checkpoint 里带 optimizer，就尽量一并恢复训练状态。
         try:
             if "optimizer" in checkpoint:
                 logging.info(f"Loading optimizer state dict (rank {self.rank})")
@@ -233,13 +271,15 @@ class Trainer:
             print("[Warning]: Error in loading optimizer's paramter group, abort loading")
             pass
 
-        # Load training progress
+        # epoch / steps / time_elapsed 让训练能够尽可能从中断点接着跑。
         if "epoch" in checkpoint:
             self.epoch = checkpoint["epoch"]
         self.steps = checkpoint["steps"] if "steps" in checkpoint else {"train": 0, "val": 0}
         self.ckpt_time_elapsed = checkpoint.get("time_elapsed", 0)
+        self.best_psnr = checkpoint.get("best_psnr", self.best_psnr)
+        self.best_psnr_epoch = checkpoint.get("best_psnr_epoch", self.best_psnr_epoch)
 
-        # Load AMP scaler state if available
+        # 混合精度训练时，GradScaler 状态也需要恢复，否则 loss scale 会重新热身。
         if self.optim_conf.amp.enabled and "scaler" in checkpoint:
             self.scaler.load_state_dict(checkpoint["scaler"])
 
@@ -263,14 +303,15 @@ class Trainer:
         self.epoch = 0
         self.steps = {'train': 0, 'val': 0}
 
-        # Instantiate components from configs
+        # 所有主要组件都通过 Hydra instantiate 构建。
         self.tb_writer = instantiate(self.logging_conf.tensorboard_writer, _recursive_=False)
         self.model = instantiate(self.model_conf, _recursive_=False)
         self.loss = instantiate(self.loss_conf, _recursive_=False)
         self.gradient_clipper = instantiate(self.optim_conf.gradient_clip)
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.optim_conf.amp.enabled)
 
-        # Freeze specified model parameters if any
+        # 先建模型，再按配置冻结指定模块。
+        # 对迁移学习很关键，例如只冻结已经有预训练权重的 encoder。
         if getattr(self.optim_conf, "frozen_module_names", None):
             logging.info(
                 f"[Start] Freezing modules: {self.optim_conf.frozen_module_names} on rank {self.distributed_rank}"
@@ -286,11 +327,11 @@ class Trainer:
                 f"[Done] Freezing modules: {self.optim_conf.frozen_module_names} on rank {self.distributed_rank}"
             )
 
-        # ADD: whether to freeze register token for pi3
+        # register token 是否冻结单独给了一个开关，方便针对 Pi3/Pi3X 迁移实验。
         if getattr(self.optim_conf, "freeze_register", False):
             self.model.register_token.requires_grad = False
 
-        # Log model summary on rank 0
+        # 只在 rank 0 写模型摘要，避免多卡重复写文件。
         if self.rank == 0:
             model_summary_path = os.path.join(self.logging_conf.log_dir, "model.txt")
             model_summary(self.model, log_file=model_summary_path)
@@ -304,6 +345,8 @@ class Trainer:
         self.val_dataset = None
 
         if self.mode in ["train", "val"]:
+            # 这里先实例化 dataset，而不是 dataloader。
+            # 真正的 loader 会在每个 epoch 动态创建，因为该项目支持动态多视图采样。
             self.val_dataset = instantiate(
                 self.data_conf.get('val', None), _recursive_=False
             )
@@ -318,6 +361,7 @@ class Trainer:
         """Wraps the model with DistributedDataParallel (DDP)."""
         assert isinstance(self.model, torch.nn.Module)
 
+        # DDP 的这些参数会直接影响通信性能和显存占用。
         ddp_options = dict(
             find_unused_parameters=distributed_conf.find_unused_parameters,
             gradient_as_bucket_view=distributed_conf.gradient_as_bucket_view,
@@ -325,6 +369,7 @@ class Trainer:
             broadcast_buffers=distributed_conf.broadcast_buffers,
         )
 
+        # 包装后，self.model(...) 就会自动触发梯度同步。
         self.model = nn.parallel.DistributedDataParallel(
             self.model,
             device_ids=[self.local_rank] if device == "cuda" else [],
@@ -351,11 +396,15 @@ class Trainer:
             ):
                 checkpoint_names.append(f"checkpoint_{int(epoch)}")
 
+        # 这里只保存恢复训练真正需要的内容：
+        # 模型权重、优化器状态、AMP scaler、epoch/step、累计训练时长。
         checkpoint_content = {
             "prev_epoch": epoch,
             "steps": self.steps,
             "time_elapsed": self.time_elapsed_meter.val,
             "optimizer": [optim.optimizer.state_dict() for optim in self.optims],
+            "best_psnr": self.best_psnr,
+            "best_psnr_epoch": self.best_psnr_epoch,
         }
         
         if len(self.optims) == 1:
@@ -363,7 +412,7 @@ class Trainer:
         if self.optim_conf.amp.enabled:
             checkpoint_content["scaler"] = self.scaler.state_dict()
 
-        # Save the checkpoint for DDP only
+        # DDPCheckpointSaver 内部会处理“只让合适的 rank 落盘”这件事。
         saver = DDPCheckpointSaver(
             checkpoint_folder,
             checkpoint_names=checkpoint_names,
@@ -384,36 +433,92 @@ class Trainer:
             return self.logging_conf.scalar_keys_to_log[phase].keys_to_log
         return []
 
+    def _compute_validation_psnr(self, predictions: Mapping, batch: Mapping) -> Optional[torch.Tensor]:
+        """
+        Compute a mean PSNR over all available material properties in the validation batch.
+        """
+        psnr_values = []
+        prop_names = ["albedo", "metallic", "roughness", "normal", "shading"]
+
+        for prop_name in prop_names:
+            mask_name = f"mask_{prop_name}"
+            if prop_name not in predictions or prop_name not in batch or mask_name not in batch:
+                continue
+
+            pred = predictions[prop_name]
+            target = batch[prop_name].permute(0, 1, 3, 4, 2).contiguous()
+            mask = batch[mask_name]
+
+            if prop_name == "normal":
+                pred = ((pred + 1.0) / 2.0).clamp(0.0, 1.0)
+                target = ((target + 1.0) / 2.0).clamp(0.0, 1.0)
+            else:
+                pred = pred.clamp(0.0, 1.0)
+                target = target.clamp(0.0, 1.0)
+
+            psnr = compute_masked_psnr(pred, target, mask)
+            if psnr is not None and torch.isfinite(psnr):
+                psnr_values.append(psnr)
+
+        if not psnr_values:
+            return None
+
+        return torch.stack(psnr_values).mean()
+
+    def _maybe_save_best_checkpoint(self, val_metrics: Optional[Dict[str, float]]) -> None:
+        """
+        Save best.pt when validation PSNR improves.
+        """
+        if not val_metrics or "psnr" not in val_metrics:
+            return
+
+        current_psnr = float(val_metrics["psnr"])
+        if current_psnr <= self.best_psnr:
+            return
+
+        self.best_psnr = current_psnr
+        self.best_psnr_epoch = int(self.epoch)
+
+        logging.info(
+            f"New best PSNR: {self.best_psnr:.4f} at epoch {self.best_psnr_epoch}. Saving best checkpoint."
+        )
+        self.save_checkpoint(self.epoch, checkpoint_names=["best"])
+
     def run(self):
         """Main entry point to start the training or validation process."""
         assert self.mode in ["train", "val"], f"Invalid mode: {self.mode}"
         if self.mode == "train":
             self.run_train()
             # Optionally run a final validation after all training is done
-            self.run_val()
+            val_metrics = self.run_val()
+            self._maybe_save_best_checkpoint(val_metrics)
         elif self.mode == "val":
-            self.run_val()
+            val_metrics = self.run_val()
+            self._maybe_save_best_checkpoint(val_metrics)
 
     def run_train(self):
         """Runs the main training loop over all epochs."""
         while self.epoch < self.max_epochs:
+            # 每个 epoch 调一次 seed，既保证可复现，也让动态采样每轮有变化。
             set_seeds(self.seed_value + self.epoch * 100, self.max_epochs, self.distributed_rank)
             
+            # 这个项目的 loader 是“按 epoch 动态构建”的，不是一次建好用到底。
             dataloader = self.train_dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
             self.train_epoch(dataloader)
             
-            # Save checkpoint after each training epoch
+            # 每个 epoch 后至少会更新一次 checkpoint。
             self.save_checkpoint(self.epoch)
 
-            # Clean up memory
+            # 动态多视图 batch 很吃显存，这里及时清理缓存。
             del dataloader
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
 
-            # Run validation at the specified frequency
+            # 按配置决定是否在当前 epoch 后做验证。
             if self.epoch % self.val_epoch_freq == 0 and self.epoch < self.max_epochs - 1:
-                self.run_val()
+                val_metrics = self.run_val()
+                self._maybe_save_best_checkpoint(val_metrics)
             
             self.epoch += 1
         
@@ -423,22 +528,25 @@ class Trainer:
         """Runs a full validation epoch if a validation dataset is available."""
         if not self.val_dataset:
             logging.info("No validation dataset configured. Skipping validation.")
-            return
+            return None
 
         dataloader = self.val_dataset.get_loader(epoch=int(self.epoch + self.distributed_rank))
-        self.val_epoch(dataloader)
+        val_metrics = self.val_epoch(dataloader)
         
         del dataloader
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+        return val_metrics
 
 
     @torch.no_grad()
     def val_epoch(self, val_loader):
+        # AverageMeter / ProgressMeter 是这个项目统一的日志统计工具。
         batch_time = AverageMeter("Batch Time", self.device, ":.4f")
         data_time = AverageMeter("Data Time", self.device, ":.4f")
         mem = AverageMeter("Mem (GB)", self.device, ":.4f")
+        psnr_meter = AverageMeter("PSNR", self.device, ":.4f")
         phase = 'val'
         
         loss_names = self._get_scalar_log_keys(phase)
@@ -453,6 +561,7 @@ class Trainer:
                 batch_time,
                 data_time,
                 mem,
+                psnr_meter,
                 self.time_elapsed_meter,
                 *loss_meters.values(),
             ],
@@ -469,6 +578,7 @@ class Trainer:
             else self.limit_val_batches
         )
 
+        # 每轮验证单独建一个目录，便于直接翻图看训练效果。
         epoch_val_dir = os.path.join(self.checkpoint_conf.val_dir, f"epoch{self.epoch}")
         os.makedirs(epoch_val_dir, exist_ok=True)
 
@@ -476,28 +586,34 @@ class Trainer:
             if data_iter >= limit_val_batches:
                 break
             
-            # measure data loading time
+            # 统计 dataloader 取 batch 的耗时。
             data_time.update(time.time() - end)
             
             batch = copy_data_to_device(batch, self.device, non_blocking=True)
 
             amp_type = torch.bfloat16 if self.optim_conf.amp.amp_dtype == "bfloat16" else torch.float16
             
-            # compute output
+            # 验证阶段只 forward，不 backward。
             with torch.cuda.amp.autocast(
                 enabled=self.optim_conf.amp.enabled,
                 dtype=amp_type,
             ):
                 val_predictions = self._val_step(batch, self.model, phase, loss_meters)
 
-            # save validations
-            # save validation predictions
+            batch_psnr = self._compute_validation_psnr(val_predictions, batch)
+            if batch_psnr is not None:
+                psnr_meter.update(batch_psnr.item(), batch["images"].shape[0])
+                if self.rank == 0 and self.steps[phase] % self.logging_conf.log_freq == 0:
+                    self.tb_writer.log("Metrics/val/psnr", batch_psnr.item(), self.steps[phase])
+
+            # 这里会把输入图、GT、预测结果、mask 全部保存成 PNG。
+            # 对材质任务非常有用，因为很多时候“看图”比只看 loss 更快发现问题。
             from torchvision.utils import save_image
             orig_ids = batch["ids"]
             for ii, scene_cam in enumerate(batch["seq_name"]):
                 scene_cam_val_dir = os.path.join(epoch_val_dir, scene_cam.replace('/', '_'))
                 os.makedirs(scene_cam_val_dir, exist_ok=True)
-                # save image, gt_albedo, predicted_albedo
+                # orig_ids 记录当前采到的是哪些视角，方便回溯对应原始样本。
                 orig_id = "_".join([str(xx) for xx in orig_ids[ii].tolist()])
                 image = batch["images"][ii] # N, C, H, W
                 image = linear_to_srgb_tensor(image)
@@ -509,6 +625,8 @@ class Trainer:
                         gt_tensor = batch[prop_name][ii]
                         pred_tensor = val_predictions[prop_name][ii].permute(0, 3, 1, 2)
 
+                        # 可视化时把不同物理量转到更适合显示的范围：
+                        # 颜色类量 -> sRGB；法线 -> 从 [-1,1] 映射到 [0,1]。
                         if prop_name in ["albedo", "metallic", "roughness", "shading"]:
                             gt_tensor = linear_to_srgb_tensor(gt_tensor)
                             pred_tensor = linear_to_srgb_tensor(pred_tensor)
@@ -526,7 +644,7 @@ class Trainer:
                     if mask_name in batch:
                         save_image(batch[mask_name][ii].to(float).unsqueeze(1), os.path.join(scene_cam_val_dir, f"{orig_id}_{mask_name}.png"))
 
-            # measure elapsed time
+            # 统计一个 iteration 从开始到现在的完整耗时。
             batch_time.update(time.time() - end)
             end = time.time()
 
@@ -540,9 +658,16 @@ class Trainer:
             if data_iter % self.logging_conf.log_freq == 0:
                 progress.display(data_iter)
 
-        return True
+        val_metrics = {}
+        if psnr_meter.count > 0:
+            val_metrics["psnr"] = psnr_meter.avg
+            if self.rank == 0:
+                logging.info(f"Validation PSNR: {psnr_meter.avg:.4f} dB")
+
+        return val_metrics
 
     def train_epoch(self, train_loader):        
+        # 训练阶段除了 loss，还会额外记录梯度裁剪相关的 grad norm。
         batch_time = AverageMeter("Batch Time", self.device, ":.4f")
         data_time = AverageMeter("Data Time", self.device, ":.4f")
         mem = AverageMeter("Mem (GB)", self.device, ":.4f")
@@ -583,32 +708,33 @@ class Trainer:
         )
         
         if self.gradient_clipper is not None:
-            # setup gradient clipping at the beginning of training
+            # 先把 clipping hook / 配置准备好，真正 step 前再执行。
             self.gradient_clipper.setup_clipping(self.model)
 
         for data_iter, batch in enumerate(train_loader):
             if data_iter >= limit_train_batches:
                 break
 
-            # measure data loading time
+            # 统计 dataloader 取 batch 的耗时。
             data_time.update(time.time() - end)
 
             batch = copy_data_to_device(batch, self.device, non_blocking=True)
 
+            # 梯度累积时，会把大 batch 切成多个小 chunk 依次 forward/backward。
             chunked_batches = chunk_batch_for_accum_steps(batch, self.accum_steps)
 
             self._run_steps_on_batch_chunks(
                 chunked_batches, phase, loss_meters
             )
 
-            # compute gradient and do SGD step
+            # where 表示整体训练进度，用于驱动 scheduler。
             self.where = float(self.epoch + float(data_iter) / limit_train_batches) / self.max_epochs
             
             if self.where < 1.0:
                 for optim in self.optims:
                     optim.step_schedulers(self.where)
                     
-            # Log schedulers
+            # 把 lr / wd 等 scheduler 调整后的值写进 TensorBoard。
             if self.steps[phase] % self.logging_conf.log_freq == 0:
                 for i, optim in enumerate(self.optims):
                     for j, param_group in enumerate(optim.optimizer.param_groups):
@@ -620,7 +746,7 @@ class Trainer:
                                 self.steps[phase],
                             )
 
-            # Clipping gradients and detecting diverging gradients
+            # 在 scaler.step 之前先 unscale，再做梯度裁剪和监控。
             if self.gradient_clipper is not None:
                 for optim in self.optims:
                     self.scaler.unscale_(optim.optimizer)
@@ -630,12 +756,12 @@ class Trainer:
                 for key, grad_norm in grad_norm_dict.items():
                     loss_meters[f"Grad/{key}"].update(grad_norm)
 
-            # Optimizer step
+            # 这里才是真正的参数更新时刻。
             for optim in self.optims:   
                 self.scaler.step(optim.optimizer)
             self.scaler.update()
 
-            # Measure elapsed time
+            # 记录时间和显存峰值。
             batch_time.update(time.time() - end)
             end = time.time()
             self.time_elapsed_meter.update(
@@ -658,7 +784,9 @@ class Trainer:
         Run the forward / backward as many times as there are chunks in the batch,
         accumulating the gradients on each backward
         """        
-        
+        # 梯度累积的核心思想：
+        # 一个原始 batch 被拆成多个 chunk，逐个 backward，把梯度累到参数上，
+        # 最后只做一次 optimizer.step()，从而模拟更大的 batch。
         for optim in self.optims:   
             optim.zero_grad(set_to_none=True)
 
@@ -666,6 +794,8 @@ class Trainer:
         amp_type = torch.bfloat16 if self.optim_conf.amp.amp_dtype == "bfloat16" else torch.float16
         
         for i, chunked_batch in enumerate(chunked_batches):
+            # DDP 下，除了最后一个 chunk，前面的 backward 不需要立刻做梯度同步，
+            # 用 no_sync() 能明显减少通信开销。
             ddp_context = (
                 self.model.no_sync()
                 if i < accum_steps - 1
@@ -682,10 +812,12 @@ class Trainer:
                     )
 
 
+                # 每个 chunk 只承担总 loss 的一部分，所以要除以 accum_steps。
                 loss = loss_dict["objective"] / accum_steps
                 loss_key = f"Loss/{phase}_loss_objective"
                 batch_size = chunked_batch["images"].shape[0]
 
+                # 遇到 NaN / Inf 直接中断本轮，避免把梯度写坏。
                 if not math.isfinite(loss.item()):
                     logging.error(f"Loss is {loss.item()}, attempting to stop training")
                     return
@@ -701,8 +833,10 @@ class Trainer:
         Returns:
             A dictionary containing the computed losses.
         """
+        # 模型只吃图像输入；其它监督量都在 batch 中留给 loss 使用。
         y_hat = model(imgs=batch["images"])
         loss_dict = self.loss(y_hat, batch)
+        # 合并预测、loss、原始 batch，后续日志和可视化统一从 log_data 里取。
         log_data = {**y_hat, **loss_dict, **batch}
 
         self._update_and_log_scalars(log_data, phase, self.steps[phase], loss_meters)
@@ -715,6 +849,7 @@ class Trainer:
         """
         Performs a single forward pass, computes loss, and logs results.
         """
+        # 验证也会算 loss 并记录标量，只是不做 backward。
         y_hat = model(imgs=batch["images"])
         loss_dict = self.loss(y_hat, batch)
         log_data = {**y_hat, **loss_dict, **batch}
@@ -732,6 +867,8 @@ class Trainer:
         
         for key in keys_to_log:
             if key in data:
+                # AverageMeter 负责平滑显示当前 epoch 的均值；
+                # TensorBoard 则保留逐 step 的原始曲线。
                 value = data[key].item() if torch.is_tensor(data[key]) else data[key]
                 loss_meters[f"Loss/{phase}_{key}"].update(value, batch_size)
                 if step % self.logging_conf.log_freq == 0 and self.rank == 0:
@@ -751,6 +888,7 @@ class Trainer:
         if phase in self.logging_conf.visuals_keys_to_log:
             keys_to_log = self.logging_conf.visuals_keys_to_log[phase]["keys_to_log"]
             
+            # 这里只取 batch 的第一个样本做可视化，再把多个 key 竖着拼起来。
             visuals_to_log = torchvision.utils.make_grid(
                 [
                     torchvision.utils.make_grid(
@@ -789,6 +927,8 @@ def get_chunk_from_data(data: Any, chunk_id: int, num_chunks: int) -> Any:
     """
     Recursively splits tensors and sequences within a data structure into chunks.
     """
+    # 这个工具函数很关键：它支持递归地把一个复杂 batch 拆成多个子 batch，
+    # 无论里面是 Tensor、dict、list，都会尽量按 batch 维度切开。
     if isinstance(data, torch.Tensor) or is_sequence_of_primitives(data):
         start = (len(data) // num_chunks) * chunk_id
         end = (len(data) // num_chunks) * (chunk_id + 1)

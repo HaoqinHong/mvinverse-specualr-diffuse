@@ -11,9 +11,6 @@ from omegaconf import DictConfig, OmegaConf
 from trainer import Trainer
 from train_utils.general import safe_makedirs
 
-import sys
-sys.path.append("/home/data/wxz/projects/FFInstrinsic/pi3")
-
 def main():
     parser = argparse.ArgumentParser(description="Train model with configurable YAML file")
     parser.add_argument(

@@ -1,6 +1,7 @@
 pillow
 opencv-python
 huggingface_hub
+safetensors
 
 # training
 hydra-core
