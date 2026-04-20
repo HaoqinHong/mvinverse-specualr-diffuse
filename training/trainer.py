@@ -438,7 +438,7 @@ class Trainer:
         Compute a mean PSNR over all available material properties in the validation batch.
         """
         psnr_values = []
-        prop_names = ["albedo", "metallic", "roughness", "normal", "shading"]
+        prop_names = ["albedo", "metallic", "roughness", "diffuse", "specular", "glossiness", "normal", "shading"]
 
         for prop_name in prop_names:
             mask_name = f"mask_{prop_name}"
@@ -619,7 +619,9 @@ class Trainer:
                 image = linear_to_srgb_tensor(image)
                 save_image(image,  os.path.join(scene_cam_val_dir, f"{orig_id}_image.png"))
 
-                PROPERTIES_TO_VALIDATE = ["albedo", "metallic", "roughness", "normal", "shading"]
+                PROPERTIES_TO_VALIDATE = [
+                    "albedo", "metallic", "roughness", "diffuse", "specular", "glossiness", "normal", "shading"
+                ]
                 for prop_name in PROPERTIES_TO_VALIDATE:
                     if prop_name in batch and prop_name in val_predictions:
                         gt_tensor = batch[prop_name][ii]
@@ -627,7 +629,7 @@ class Trainer:
 
                         # 可视化时把不同物理量转到更适合显示的范围：
                         # 颜色类量 -> sRGB；法线 -> 从 [-1,1] 映射到 [0,1]。
-                        if prop_name in ["albedo", "metallic", "roughness", "shading"]:
+                        if prop_name in ["albedo", "metallic", "roughness", "diffuse", "specular", "glossiness", "shading"]:
                             gt_tensor = linear_to_srgb_tensor(gt_tensor)
                             pred_tensor = linear_to_srgb_tensor(pred_tensor)
                         elif prop_name == "normal":

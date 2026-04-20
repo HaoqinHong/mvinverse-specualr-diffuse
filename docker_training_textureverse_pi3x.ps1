@@ -1,3 +1,7 @@
+param(
+  [string]$ConfigName = "textureverse_pi3x_docker"
+)
+
 $ErrorActionPreference = "Stop"
 
 $codePath = "F:\hqhong\ProgrammingProjects\mvinverse"
@@ -5,6 +9,11 @@ $datasetPath = "E:\hqhong\ProgrammingProjects\datasets\texture_verse_resolution1
 $modelPath = "E:\hqhong\ProgrammingProjects\models\Pi3X"
 $runsPath = "E:\hqhong\ProgrammingProjects\runs"
 $imageName = "da3-3dat:latest"
+
+$configPath = Join-Path $codePath "training\config\$ConfigName.yaml"
+if (-not (Test-Path $configPath)) {
+  throw "Config file not found: $configPath"
+}
 
 docker run --rm --gpus all `
   -v "${codePath}:/workspace/code/mvinverse" `
@@ -18,5 +27,5 @@ docker run --rm --gpus all `
     python3 -m pip install -r requirements.txt
     python3 -m pip install -e .
     cd training
-    torchrun --nproc_per_node=1 launch.py --config textureverse_pi3x_docker
+    torchrun --nproc_per_node=1 launch.py --config $ConfigName
   "

@@ -1,0 +1,6 @@
+defaults:
+  - textureverse_pi3x_docker
+  - _self_
+
+exp_name: textureverse_pi3x_docker_specular_glossiness
+material_workflow: specular_diffuse_glossiness

@@ -16,7 +16,19 @@ class MultitaskLoss(torch.nn.Module):
     - Normal loss 
     """
     # def __init__(self, camera=None, depth=None, point=None, track=None, albedo=None, metallic=None, roughness=None, normal=None, **kwargs):
-    def __init__(self, albedo=None, metallic=None, roughness=None, normal=None, shading=None, **kwargs):
+    def __init__(
+        self,
+        albedo=None,
+        metallic=None,
+        roughness=None,
+        normal=None,
+        shading=None,
+        diffuse=None,
+        specular=None,
+        glossiness=None,
+        material_workflow="metallic_roughness",
+        **kwargs,
+    ):
         super().__init__()
         # 每个分支都带一份独立的 loss 配置，通常包含各子项权重、
         # 是否做尺度对齐、以及多尺度梯度损失的层数等超参数。
@@ -25,6 +37,10 @@ class MultitaskLoss(torch.nn.Module):
         self.roughness = roughness
         self.normal = normal
         self.shading = shading
+        self.diffuse = diffuse
+        self.specular = specular
+        self.glossiness = glossiness
+        self.material_workflow = material_workflow
 
     def forward(self, predictions, batch) -> torch.Tensor:
         """
@@ -84,6 +100,30 @@ class MultitaskLoss(torch.nn.Module):
                 self.shading["grad_weight"] * shading_loss_dict["loss_grad_shading"]
             total_loss = total_loss + shading_loss
             loss_dict.update(shading_loss_dict)
+
+        if "diffuse" in predictions and "diffuse" in batch:
+            diffuse_loss_dict = compute_diffuse_loss(predictions, batch, **self.diffuse)
+            diffuse_loss = \
+                self.diffuse["reg_weight"] * diffuse_loss_dict["loss_reg_diffuse"] + \
+                self.diffuse["grad_weight"] * diffuse_loss_dict["loss_grad_diffuse"]
+            total_loss = total_loss + diffuse_loss
+            loss_dict.update(diffuse_loss_dict)
+
+        if "specular" in predictions and "specular" in batch:
+            specular_loss_dict = compute_specular_loss(predictions, batch, **self.specular)
+            specular_loss = \
+                self.specular["reg_weight"] * specular_loss_dict["loss_reg_specular"] + \
+                self.specular["grad_weight"] * specular_loss_dict["loss_grad_specular"]
+            total_loss = total_loss + specular_loss
+            loss_dict.update(specular_loss_dict)
+
+        if "glossiness" in predictions and "glossiness" in batch:
+            glossiness_loss_dict = compute_glossiness_loss(predictions, batch, **self.glossiness)
+            glossiness_loss = \
+                self.glossiness["reg_weight"] * glossiness_loss_dict["loss_reg_glossiness"] + \
+                self.glossiness["grad_weight"] * glossiness_loss_dict["loss_grad_glossiness"]
+            total_loss = total_loss + glossiness_loss
+            loss_dict.update(glossiness_loss_dict)
 
         loss_dict["objective"] = total_loss
         return loss_dict
@@ -298,6 +338,70 @@ def compute_shading_loss(predictions, batch, **kwargs):
     }
 
     return loss_dict
+
+
+def _compute_rgb_material_loss(predictions, batch, pred_key, batch_key, mask_key, loss_suffix, **kwargs):
+    pred_map = predictions[pred_key]
+    mask_map = batch[mask_key]
+
+    B, N, H, W, C = pred_map.shape
+    gt_map = []
+    for i, seq_name in enumerate(batch["seq_name"]):
+        if "multi_illum" in seq_name:
+            gt = torch.mean(pred_map[i], dim=0, keepdim=True).detach()
+            gt = gt.expand((N, H, W, C))
+        else:
+            gt = batch[batch_key][i].permute(0, 2, 3, 1).contiguous()
+        gt_map.append(gt)
+    gt_map = torch.stack(gt_map, dim=0)
+
+    if mask_map.sum() < 100:
+        dummy_loss = (0.0 * pred_map).mean()
+        return {
+            f"loss_reg_{loss_suffix}": dummy_loss,
+            f"loss_grad_{loss_suffix}": dummy_loss,
+        }
+
+    b_scale = kwargs["b_scale"] if "b_scale" in kwargs else True
+    scales = kwargs["scales"] if "scales" in kwargs else 4
+    loss_reg, loss_grad = material_regression_loss(
+        pred_map, gt_map, mask_map, b_scale=b_scale, scales=scales
+    )
+    return {
+        f"loss_reg_{loss_suffix}": loss_reg,
+        f"loss_grad_{loss_suffix}": loss_grad,
+    }
+
+
+def compute_diffuse_loss(predictions, batch, **kwargs):
+    return _compute_rgb_material_loss(
+        predictions, batch, "diffuse", "diffuse", "mask_diffuse", "diffuse", **kwargs
+    )
+
+
+def compute_specular_loss(predictions, batch, **kwargs):
+    return _compute_rgb_material_loss(
+        predictions, batch, "specular", "specular", "mask_specular", "specular", **kwargs
+    )
+
+
+def compute_glossiness_loss(predictions, batch, **kwargs):
+    pred_glossiness = predictions["glossiness"]
+    gt_glossiness = batch["glossiness"].permute(0, 1, 3, 4, 2).contiguous()
+    mask_glossiness = batch["mask_glossiness"]
+
+    if mask_glossiness.sum() < 100:
+        dummy_loss = (0.0 * pred_glossiness).mean()
+        return {
+            "loss_reg_glossiness": dummy_loss,
+            "loss_grad_glossiness": dummy_loss,
+        }
+
+    loss_reg, loss_grad = material_regression_loss(pred_glossiness, gt_glossiness, mask_glossiness)
+    return {
+        "loss_reg_glossiness": loss_reg,
+        "loss_grad_glossiness": loss_grad,
+    }
 
 def compute_scale(pred, gt, mask, eps=1e-5):
     """

@@ -24,6 +24,14 @@ def _read_image_float(path, flags=cv2.IMREAD_UNCHANGED):
     return img
 
 
+def _find_existing_filepath(seq_dir, folder_candidates, filename):
+    for folder in folder_candidates:
+        path = osp.join(seq_dir, folder, filename)
+        if osp.exists(path):
+            return path
+    return None
+
+
 class TextureVerseDataset(BaseDataset):
     def __init__(
         self,
@@ -35,6 +43,9 @@ class TextureVerseDataset(BaseDataset):
         len_train: int = 100000,
         len_test: int = 10000,
         expand_ratio: int = 8,
+        diffuse_dirs=None,
+        specular_dirs=None,
+        glossiness_dirs=None,
     ):
         if common_conf is None:
             common_conf = common_config
@@ -52,6 +63,9 @@ class TextureVerseDataset(BaseDataset):
         self.expand_ratio = expand_ratio
         self.TextureVerse_DIR = TextureVerse_DIR
         self.min_num_images = min_num_images
+        self.diffuse_dirs = diffuse_dirs or ["diffuse", "diffuser", "diffusecolor"]
+        self.specular_dirs = specular_dirs or ["specular", "specularcolor"]
+        self.glossiness_dirs = glossiness_dirs or ["glossiness", "gloss", "smoothness"]
 
         if split == "train":
             self.len_train = len_train
@@ -129,11 +143,17 @@ class TextureVerseDataset(BaseDataset):
         albedo_list = []
         metallic_list = []
         roughness_list = []
+        diffuse_list = []
+        specular_list = []
+        glossiness_list = []
         normal_list = []
         shading_list = []
         mask_albedo_list = []
         mask_metallic_list = []
         mask_roughness_list = []
+        mask_diffuse_list = []
+        mask_specular_list = []
+        mask_glossiness_list = []
         mask_normal_list = []
         mask_shading_list = []
 
@@ -143,12 +163,18 @@ class TextureVerseDataset(BaseDataset):
             albedo_filepath = osp.join(seq_dir, "basecolor", filename)
             metallic_filepath = osp.join(seq_dir, "metallic", filename)
             roughness_filepath = osp.join(seq_dir, "roughness", filename)
+            diffuse_filepath = _find_existing_filepath(seq_dir, self.diffuse_dirs, filename)
+            specular_filepath = _find_existing_filepath(seq_dir, self.specular_dirs, filename)
+            glossiness_filepath = _find_existing_filepath(seq_dir, self.glossiness_dirs, filename)
             normal_filepath = osp.join(seq_dir, "normal_png", filename)
 
             image = _read_image_float(image_filepath)
             albedo = _read_image_float(albedo_filepath)
             metallic = _read_image_float(metallic_filepath)[:, :, :1]
             roughness = _read_image_float(roughness_filepath)[:, :, :1]
+            diffuse = _read_image_float(diffuse_filepath) if diffuse_filepath is not None else None
+            specular = _read_image_float(specular_filepath) if specular_filepath is not None else None
+            glossiness = _read_image_float(glossiness_filepath)[:, :, :1] if glossiness_filepath is not None else None
             normal = _read_image_float(normal_filepath)
             normal = normal * 2.0 - 1.0
             eps = 1e-10
@@ -162,6 +188,9 @@ class TextureVerseDataset(BaseDataset):
             mask_albedo[(albedo < 0.004).all(axis=-1)] = False
             mask_metallic = ~invalid_mask
             mask_roughness = ~invalid_mask
+            mask_diffuse = ~invalid_mask if diffuse is not None else None
+            mask_specular = ~invalid_mask if specular is not None else None
+            mask_glossiness = ~invalid_mask if glossiness is not None else None
             mask_normal = ~invalid_mask
             mask_shading = ~invalid_mask
 
@@ -170,11 +199,17 @@ class TextureVerseDataset(BaseDataset):
                 albedo,
                 metallic,
                 roughness,
+                diffuse,
+                specular,
+                glossiness,
                 normal,
                 shading,
                 mask_albedo,
                 mask_metallic,
                 mask_roughness,
+                mask_diffuse,
+                mask_specular,
+                mask_glossiness,
                 mask_normal,
                 mask_shading,
             ) = self.process_one_image_wo_geo(
@@ -182,11 +217,17 @@ class TextureVerseDataset(BaseDataset):
                 albedo=albedo,
                 metallic=metallic,
                 roughness=roughness,
+                diffuse=diffuse,
+                specular=specular,
+                glossiness=glossiness,
                 normal=normal,
                 shading=shading,
                 mask_albedo=mask_albedo,
                 mask_metallic=mask_metallic,
                 mask_roughness=mask_roughness,
+                mask_diffuse=mask_diffuse,
+                mask_specular=mask_specular,
+                mask_glossiness=mask_glossiness,
                 mask_normal=mask_normal,
                 mask_shading=mask_shading,
                 target_image_shape=target_image_shape,
@@ -197,12 +238,18 @@ class TextureVerseDataset(BaseDataset):
             albedo_list.append(albedo)
             metallic_list.append(metallic)
             roughness_list.append(roughness)
+            diffuse_list.append(diffuse)
+            specular_list.append(specular)
+            glossiness_list.append(glossiness)
             normal_list.append(normal)
             shading_list.append(shading)
 
             mask_albedo_list.append(mask_albedo)
             mask_metallic_list.append(mask_metallic)
             mask_roughness_list.append(mask_roughness)
+            mask_diffuse_list.append(mask_diffuse)
+            mask_specular_list.append(mask_specular)
+            mask_glossiness_list.append(mask_glossiness)
             mask_normal_list.append(mask_normal)
             mask_shading_list.append(mask_shading)
 
@@ -215,11 +262,17 @@ class TextureVerseDataset(BaseDataset):
             "albedo": albedo_list,
             "metallic": metallic_list,
             "roughness": roughness_list,
+            "diffuse": diffuse_list,
+            "specular": specular_list,
+            "glossiness": glossiness_list,
             "normal": normal_list,
             "shading": shading_list,
             "mask_albedo": mask_albedo_list,
             "mask_metallic": mask_metallic_list,
             "mask_roughness": mask_roughness_list,
+            "mask_diffuse": mask_diffuse_list,
+            "mask_specular": mask_specular_list,
+            "mask_glossiness": mask_glossiness_list,
             "mask_normal": mask_normal_list,
             "mask_shading": mask_shading_list,
         }

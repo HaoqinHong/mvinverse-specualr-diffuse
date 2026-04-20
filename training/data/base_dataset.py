@@ -133,11 +133,17 @@ class BaseDataset(Dataset):
         albedo=None,
         metallic=None,
         roughness=None,
+        diffuse=None,
+        specular=None,
+        glossiness=None,
         normal=None,
         shading=None,
         mask_albedo=None,
         mask_metallic=None,
         mask_roughness=None,
+        mask_diffuse=None,
+        mask_specular=None,
+        mask_glossiness=None,
         mask_normal=None,
         mask_shading=None,
     ):
@@ -151,10 +157,16 @@ class BaseDataset(Dataset):
             albedo (np.ndarray, optional):  Defaults to None.
             metallic (np.ndarray, optional):  Defaults to None.
             roughness (np.ndarray, optional):  Defaults to None.
+            diffuse (np.ndarray, optional):  Defaults to None.
+            specular (np.ndarray, optional):  Defaults to None.
+            glossiness (np.ndarray, optional):  Defaults to None.
             normal (np.ndarray, optional):  Defaults to None.
             mask_albedo (np.ndarray, optional):  Defaults to None.
             mask_metallic (np.ndarray, optional):  Defaults to None.
             mask_roughness (np.ndarray, optional):  Defaults to None.
+            mask_diffuse (np.ndarray, optional):  Defaults to None.
+            mask_specular (np.ndarray, optional):  Defaults to None.
+            mask_glossiness (np.ndarray, optional):  Defaults to None.
             mask_normal (np.ndarray, optional):  Defaults to None.
 
         Returns:
@@ -209,8 +221,8 @@ class BaseDataset(Dataset):
 
         # all maps to process
         maps_to_process = [
-            image, albedo, metallic, roughness, normal, shading,
-            mask_albedo, mask_metallic, mask_roughness, mask_normal, mask_shading,
+            image, albedo, metallic, roughness, diffuse, specular, glossiness, normal, shading,
+            mask_albedo, mask_metallic, mask_roughness, mask_diffuse, mask_specular, mask_glossiness, mask_normal, mask_shading,
         ]
         
         processed_maps = [_crop_or_pad_image(m, target_image_shape) for m in maps_to_process]

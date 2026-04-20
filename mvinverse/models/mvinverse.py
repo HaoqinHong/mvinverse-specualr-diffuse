@@ -22,12 +22,14 @@ class MVInverse(nn.Module, PyTorchModelHubMixin):
         dec_num_heads=16,
         mlp_ratio=4,
         num_register_tokens=5,
+        material_workflow='metallic_roughness',
     ):
         super().__init__()
         self.patch_size = 14
         self.dec_embed_dim = dec_embed_dim
         self.num_register_tokens = num_register_tokens
         self.patch_start_idx = num_register_tokens
+        self.material_workflow = material_workflow
 
         self._init_encoder()
         self._init_pos_encoding(pos_type)
@@ -78,10 +80,18 @@ class MVInverse(nn.Module, PyTorchModelHubMixin):
     def _init_heads(self, dec_embed_dim: int):
         dim_in = 2 * dec_embed_dim
         self.albedo_head = DPTHeadRes(dim_in=dim_in, output_dim=3, activation="sigmoid")
-        self.metallic_head = DPTHead(dim_in=dim_in, output_dim=1, activation="sigmoid")
-        self.roughness_head = DPTHead(dim_in=dim_in, output_dim=1, activation="sigmoid")
         self.normal_head = DPTHead(dim_in=dim_in, output_dim=3, activation="tanh")
         self.shading_head = DPTHeadRes(dim_in=dim_in, output_dim=3, activation="sigmoid")
+
+        if self.material_workflow == "metallic_roughness":
+            self.metallic_head = DPTHead(dim_in=dim_in, output_dim=1, activation="sigmoid")
+            self.roughness_head = DPTHead(dim_in=dim_in, output_dim=1, activation="sigmoid")
+        elif self.material_workflow == "specular_diffuse_glossiness":
+            self.diffuse_head = DPTHeadRes(dim_in=dim_in, output_dim=3, activation="sigmoid")
+            self.specular_head = DPTHeadRes(dim_in=dim_in, output_dim=3, activation="sigmoid")
+            self.glossiness_head = DPTHead(dim_in=dim_in, output_dim=1, activation="sigmoid")
+        else:
+            raise ValueError(f"Unsupported material_workflow: {self.material_workflow}")
 
     def _register_normalization_buffers(self):
         image_mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -152,17 +162,25 @@ class MVInverse(nn.Module, PyTorchModelHubMixin):
 
         # prediction
         albedo = self.albedo_head(intermediates, imgs, res_features=res_features, patch_start_idx=self.patch_start_idx)
-        roughness = self.roughness_head(intermediates, imgs, self.patch_start_idx)
-        metallic = self.metallic_head(intermediates, imgs, self.patch_start_idx)
         normal = self.normal_head(intermediates, imgs, self.patch_start_idx)
         shading = self.shading_head(intermediates, imgs, res_features=res_features, patch_start_idx=self.patch_start_idx)
 
-        normal_normalized = F.normalize(normal, p=2, dim=-1, eps=1e-8)
-
-        return {
+        outputs = {
             "albedo": albedo,
-            "roughness": roughness,
-            "metallic": metallic,
-            "normal": normal_normalized,
+            "normal": F.normalize(normal, p=2, dim=-1, eps=1e-8),
             "shading": shading,
         }
+
+        if self.material_workflow == "metallic_roughness":
+            outputs["roughness"] = self.roughness_head(intermediates, imgs, self.patch_start_idx)
+            outputs["metallic"] = self.metallic_head(intermediates, imgs, self.patch_start_idx)
+        elif self.material_workflow == "specular_diffuse_glossiness":
+            outputs["diffuse"] = self.diffuse_head(
+                intermediates, imgs, res_features=res_features, patch_start_idx=self.patch_start_idx
+            )
+            outputs["specular"] = self.specular_head(
+                intermediates, imgs, res_features=res_features, patch_start_idx=self.patch_start_idx
+            )
+            outputs["glossiness"] = self.glossiness_head(intermediates, imgs, self.patch_start_idx)
+
+        return outputs

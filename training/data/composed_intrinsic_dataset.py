@@ -158,31 +158,40 @@ class ComposedIntrinsicDataset(Dataset, ABC):
         batch = self.base_dataset[idx_tuple]
         seq_name = batch["seq_name"]
 
+        def _to_chw_tensor(key, channel_last=True):
+            if key not in batch or batch[key] is None or len(batch[key]) == 0 or batch[key][0] is None:
+                return None
+            tensor = torch.from_numpy(np.stack(batch[key]).astype(np.float32)).contiguous()
+            if channel_last:
+                tensor = tensor.permute(0, 3, 1, 2)
+            return tensor.to(torch.get_default_dtype())
+
+        def _to_mask_tensor(key):
+            if key not in batch or batch[key] is None or len(batch[key]) == 0 or batch[key][0] is None:
+                return None
+            return torch.from_numpy(np.stack(batch[key]).astype(bool)).contiguous()
+
         # --- Data Conversion and Preparation ---
         # Convert numpy arrays to tensors
         images = torch.from_numpy(np.stack(batch["images"]).astype(np.float32)).contiguous()
         images = images.permute(0,3,1,2).to(torch.get_default_dtype())
 
-        albedo = torch.from_numpy(np.stack(batch["albedo"]).astype(np.float32)).contiguous()
-        albedo = albedo.permute(0,3,1,2).to(torch.get_default_dtype()) # (B, C, H, W)
-        mask_albedo = torch.from_numpy(np.stack(batch["mask_albedo"]).astype(bool)).contiguous()
-        # create dummy values
-
-        metallic = torch.from_numpy(np.stack(batch["metallic"]).astype(np.float32)).contiguous()
-        metallic = metallic.permute(0,3,1,2).to(torch.get_default_dtype())
-        mask_metallic = torch.from_numpy(np.stack(batch["mask_metallic"]).astype(bool)).contiguous()
-
-        roughness = torch.from_numpy(np.stack(batch["roughness"]).astype(np.float32)).contiguous()
-        roughness = roughness.permute(0,3,1,2).to(torch.get_default_dtype())
-        mask_roughness = torch.from_numpy(np.stack(batch["mask_roughness"]).astype(bool)).contiguous()
-    
-        normal = torch.from_numpy(np.stack(batch["normal"]).astype(np.float32)).contiguous()
-        normal = normal.permute(0,3,1,2).to(torch.get_default_dtype())
-        mask_normal = torch.from_numpy(np.stack(batch["mask_normal"]).astype(bool)).contiguous()
-
-        shading = torch.from_numpy(np.stack(batch["shading"]).astype(np.float32)).contiguous()
-        shading = shading.permute(0,3,1,2).to(torch.get_default_dtype())
-        mask_shading = torch.from_numpy(np.stack(batch["mask_shading"]).astype(bool)).contiguous()
+        albedo = _to_chw_tensor("albedo")
+        mask_albedo = _to_mask_tensor("mask_albedo")
+        metallic = _to_chw_tensor("metallic")
+        mask_metallic = _to_mask_tensor("mask_metallic")
+        roughness = _to_chw_tensor("roughness")
+        mask_roughness = _to_mask_tensor("mask_roughness")
+        diffuse = _to_chw_tensor("diffuse")
+        mask_diffuse = _to_mask_tensor("mask_diffuse")
+        specular = _to_chw_tensor("specular")
+        mask_specular = _to_mask_tensor("mask_specular")
+        glossiness = _to_chw_tensor("glossiness")
+        mask_glossiness = _to_mask_tensor("mask_glossiness")
+        normal = _to_chw_tensor("normal")
+        mask_normal = _to_mask_tensor("mask_normal")
+        shading = _to_chw_tensor("shading")
+        mask_shading = _to_mask_tensor("mask_shading")
 
         ids = torch.from_numpy(batch["ids"])    # Frame indices sampled from the original sequence
 
@@ -194,13 +203,20 @@ class ComposedIntrinsicDataset(Dataset, ABC):
             "albedo": albedo,
             "metallic": metallic,
             "roughness": roughness,
+            "diffuse": diffuse,
+            "specular": specular,
+            "glossiness": glossiness,
             "normal": normal,
             "shading": shading,
             "mask_albedo": mask_albedo,
             "mask_metallic": mask_metallic,
             "mask_roughness": mask_roughness,
+            "mask_diffuse": mask_diffuse,
+            "mask_specular": mask_specular,
+            "mask_glossiness": mask_glossiness,
             "mask_normal": mask_normal,
             "mask_shading": mask_shading,
         }
 
+        sample = {k: v for k, v in sample.items() if v is not None}
         return sample

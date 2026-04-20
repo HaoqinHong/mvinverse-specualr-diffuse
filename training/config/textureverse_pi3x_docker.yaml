@@ -3,6 +3,7 @@ defaults:
   - _self_
 
 exp_name: textureverse_pi3x_docker_baseline
+material_workflow: metallic_roughness
 img_size: 518
 num_workers: 0
 seed_value: 42
@@ -116,6 +117,12 @@ logging:
         - loss_grad_metallic
         - loss_reg_roughness
         - loss_grad_roughness
+        - loss_reg_diffuse
+        - loss_grad_diffuse
+        - loss_reg_specular
+        - loss_grad_specular
+        - loss_reg_glossiness
+        - loss_grad_glossiness
         - loss_negcos_normal
         - loss_reg_shading
         - loss_grad_shading
@@ -128,6 +135,12 @@ logging:
         - loss_grad_metallic
         - loss_reg_roughness
         - loss_grad_roughness
+        - loss_reg_diffuse
+        - loss_grad_diffuse
+        - loss_reg_specular
+        - loss_grad_specular
+        - loss_reg_glossiness
+        - loss_grad_glossiness
         - loss_negcos_normal
         - loss_reg_shading
         - loss_grad_shading
@@ -135,12 +148,13 @@ logging:
 checkpoint:
   save_dir: ${logging.log_dir}/ckpts
   val_dir: ${logging.log_dir}/vals
-  save_freq: 5
+  save_freq: 10
   resume_checkpoint_path: /workspace/models/Pi3X/model.safetensors
   strict: False
 
 loss:
   _target_: loss.MultitaskLoss
+  material_workflow: ${material_workflow}
   albedo:
     reg_weight: 1.0
     grad_weight: 1.0
@@ -148,6 +162,15 @@ loss:
     reg_weight: 1.0
     grad_weight: 1.0
   roughness:
+    reg_weight: 1.0
+    grad_weight: 1.0
+  diffuse:
+    reg_weight: 1.0
+    grad_weight: 1.0
+  specular:
+    reg_weight: 1.0
+    grad_weight: 1.0
+  glossiness:
     reg_weight: 1.0
     grad_weight: 1.0
   normal:
@@ -205,6 +228,7 @@ max_epochs: 50
 
 model:
   _target_: mvinverse.models.mvinverse.MVInverse
+  material_workflow: ${material_workflow}
 
 distributed:
   backend: gloo
