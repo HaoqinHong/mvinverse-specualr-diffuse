@@ -4,15 +4,15 @@ defaults:
 
 exp_name: textureverse_pi3x_docker_baseline
 material_workflow: metallic_roughness
-img_size: 518
+img_size: 448
 num_workers: 0
 seed_value: 42
 accum_steps: 1
 patch_size: 14
 val_epoch_freq: 1
-max_img_per_gpu: 4
+max_img_per_gpu: 6
 
-limit_train_batches: 500
+limit_train_batches: null
 limit_val_batches: 10
 
 data:
@@ -37,7 +37,7 @@ data:
       debug: False
       get_nearby: True
       load_depth: False
-      img_nums: [2, 4]
+      img_nums: [2, 6]
       max_img_per_gpu: ${max_img_per_gpu}
       allow_duplicate_img: False
       repeat_batch: False
@@ -78,7 +78,7 @@ data:
       debug: False
       get_nearby: True
       load_depth: False
-      img_nums: [2, 12]
+      img_nums: [2, 6]
       allow_duplicate_img: False
       augs:
         cojitter: False
@@ -148,7 +148,7 @@ logging:
 checkpoint:
   save_dir: ${logging.log_dir}/ckpts
   val_dir: ${logging.log_dir}/vals
-  save_freq: 10
+  save_freq: 5
   resume_checkpoint_path: /workspace/models/Pi3X/model.safetensors
   strict: False
 

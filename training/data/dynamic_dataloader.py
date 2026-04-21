@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from typing import Callable, Optional
+import math
 
 from hydra.utils import instantiate
 import random
@@ -192,8 +193,26 @@ class DynamicBatchSampler(Sampler):
                 break  # End of sampler's iterator
 
     def __len__(self):
-        # Return a dummy length
-        return 100000
+                """
+                Estimate steps per epoch from data scale and dynamic image-budget batching.
+
+                We use:
+                    steps ~= ceil(num_samples_per_rank / E[batch_size])
+
+                where E[batch_size] is computed from the current image_num sampling
+                distribution and the `max_img_per_gpu` budget.
+                """
+                num_samples = len(self.sampler)
+
+                # batch_size(img_num) = floor(max_img_per_gpu / img_num), with a minimum of 1
+                batch_sizes = np.floor(self.max_img_per_gpu / self.possible_nums).astype(int)
+                batch_sizes = np.maximum(batch_sizes, 1)
+
+                expected_batch_size = float(np.sum(self.normalized_weights * batch_sizes))
+                if expected_batch_size <= 0:
+                        return max(1, num_samples)
+
+                return max(1, int(math.ceil(num_samples / expected_batch_size)))
 
 
 class DynamicDistributedSampler(DistributedSampler):

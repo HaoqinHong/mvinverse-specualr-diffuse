@@ -1,0 +1,77 @@
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+FROM ${BASE_IMAGE}
+
+ARG TORCH_CUDA_ARCH_LIST=7.5;8.0;8.6;8.9;9.0+PTX
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    CUDA_HOME=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH} \
+    AT_CODE_DIRECTORY=/workspace/code \
+    AT_DATA_DIRECTORY=/workspace/data \
+    AT_MODEL_DIRECTORY=/workspace/model \
+    AT_OUTPUT_DIRECTORY=/workspace/output \
+    HF_HOME=/workspace/.cache/huggingface \
+    TORCH_HOME=/workspace/.cache/torch \
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    PYTHONPATH=/workspace/code/Depth-Anything-3/src
+
+RUN mkdir -p ${AT_CODE_DIRECTORY} ${AT_DATA_DIRECTORY} ${AT_MODEL_DIRECTORY} ${AT_OUTPUT_DIRECTORY} ${HF_HOME} ${TORCH_HOME}
+WORKDIR ${AT_CODE_DIRECTORY}
+
+# System dependencies for DA3 inference/training and common 3D/vision libs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3-pip python3.10-dev python3.10-venv \
+    git git-lfs \
+    build-essential pkg-config cmake ninja-build \
+    ffmpeg \
+    libglib2.0-0 libsm6 libxext6 libxrender1 libgl1 libegl1 \
+    libgomp1 \
+    ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/* \
+  && git lfs install \
+  && python3 -m pip install --upgrade pip setuptools wheel
+
+# PyTorch CUDA 12.4 stack (aligned with this base image).
+RUN python3 -m pip install --index-url https://download.pytorch.org/whl/cu124 \
+    torch torchvision torchaudio
+
+# DA3 common runtime dependencies (xformers installed separately for compatibility).
+RUN python3 -m pip install \
+    trimesh \
+    einops \
+    huggingface_hub \
+    imageio \
+    'numpy<2' \
+    opencv-python \
+    open3d \
+    fastapi \
+    uvicorn \
+    requests \
+    typer \
+    pillow \
+    omegaconf \
+    evo \
+    e3nn \
+    moviepy==1.0.3 \
+    plyfile \
+    pillow_heif \
+    safetensors \
+    pycolmap \
+    pre-commit \
+    gradio
+
+# Install xformers after torch to avoid resolver conflicts.
+RUN python3 -m pip install xformers
+
+# Install DA3 project itself into the base image for standalone local use.
+WORKDIR /workspace/code/Depth-Anything-3
+COPY . /workspace/code/Depth-Anything-3
+
+RUN python3 -m pip install -U pip setuptools wheel hatchling hatch-vcs \
+    && python3 -m pip install -e . \
+    && python3 -m pip install "gradio>=5" \
+    && python3 -m pip install --no-build-isolation git+https://github.com/nerfstudio-project/gsplat.git@0b4dddf04cb687367602c01196913cde6a743d70

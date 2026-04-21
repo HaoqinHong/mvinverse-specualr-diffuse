@@ -1,0 +1,31 @@
+services:
+  base:
+    image: da3-base-3dat
+    build:
+      context: .
+      dockerfile: Dockerfile_base
+
+  local:
+    image: pi3-3dat
+    build:
+      context: .
+      dockerfile: Dockerfile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ipc: host
+    command: ${AT_LOCAL_COMMAND}
+    volumes:
+      - ${AT_DATA_DIRECTORY}:/home/project/data
+      - ${AT_MODEL_DIRECTORY}:/home/project/model
+      - ${AT_OUTPUT_DIRECTORY}:/home/project/output
+
+  cloud:
+    image: ${AT_CLOUD_IMAGE_NAME}
+    build:
+      context: .
+      dockerfile: Dockerfile

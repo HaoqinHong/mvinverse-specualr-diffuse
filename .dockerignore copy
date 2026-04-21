@@ -1,0 +1,5 @@
+# Exclude generated outputs from build context
+outputs/
+models/
+cache/
+examples/
