@@ -33,6 +33,39 @@ except ImportError:
     # warnings.warn("xFormers is not available (Attention)")
 
 
+def _is_pre_sm80(t: Tensor) -> bool:
+    if not t.is_cuda:
+        return False
+    major, _ = torch.cuda.get_device_capability(t.device)
+    return major < 8
+
+
+def _chunked_attention_fallback(q: Tensor, k: Tensor, v: Tensor, chunk_size: int = 64) -> Tensor:
+    # Computes attention in query chunks to avoid allocating a full [B, H, N, N] matrix.
+    scale = q.shape[-1] ** -0.5
+    k_t = k.transpose(-2, -1)
+    out = torch.empty_like(q)
+    n_tokens = q.shape[-2]
+    for start in range(0, n_tokens, chunk_size):
+        end = min(start + chunk_size, n_tokens)
+        q_chunk = q[:, :, start:end, :] * scale
+        attn = q_chunk @ k_t
+        attn = attn.softmax(dim=-1)
+        out[:, :, start:end, :] = attn @ v
+    return out
+
+
+_SLOWPATH_WARNED = False
+
+
+def _warn_sdpa_fallback_once() -> None:
+    global _SLOWPATH_WARNED
+    if _SLOWPATH_WARNED:
+        return
+    _SLOWPATH_WARNED = True
+    logging.warning("SDPA kernel unavailable, falling back to chunked attention; this is slower but more memory-stable.")
+
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -99,12 +132,18 @@ class FlashAttention(Attention):
         # q, k, v = unbind(qkv, 2)
         q, k, v = [qkv[:,:,i] for i in range(3)]
 
-        if q.dtype == torch.bfloat16:
-            with nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                x = scaled_dot_product_attention(q, k, v)
-        else:
-            with nn.attention.sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
-                x = scaled_dot_product_attention(q, k, v)
+        try:
+            if _is_pre_sm80(q):
+                x = _chunked_attention_fallback(q, k, v)
+            elif q.dtype == torch.bfloat16:
+                with nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    x = scaled_dot_product_attention(q, k, v)
+            else:
+                with nn.attention.sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
+                    x = scaled_dot_product_attention(q, k, v)
+        except RuntimeError:
+            _warn_sdpa_fallback_once()
+            x = _chunked_attention_fallback(q, k, v)
 
         x = x.transpose(1, 2).reshape([B, N, C])
 
@@ -333,12 +372,18 @@ class FlashAttentionRope(AttentionRope):
             q = self.rope(q, xpos)
             k = self.rope(k, xpos)
 
-        if q.dtype == torch.bfloat16:
-            with nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):
-                x = scaled_dot_product_attention(q, k, v)
-        else:
-            with nn.attention.sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
-                x = scaled_dot_product_attention(q, k, v)
+        try:
+            if _is_pre_sm80(q):
+                x = _chunked_attention_fallback(q, k, v)
+            elif q.dtype == torch.bfloat16:
+                with nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    x = scaled_dot_product_attention(q, k, v)
+            else:
+                with nn.attention.sdpa_kernel([SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION]):
+                    x = scaled_dot_product_attention(q, k, v)
+        except RuntimeError:
+            _warn_sdpa_fallback_once()
+            x = _chunked_attention_fallback(q, k, v)
 
         x = x.transpose(1, 2).reshape([B, N, C])
 
