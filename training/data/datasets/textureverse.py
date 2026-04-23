@@ -59,8 +59,8 @@ class TextureVerseDataset(BaseDataset):
         split: str = "train",
         TextureVerse_DIR: str = "",
         min_num_images: int = 4,
-        len_train: int = 100000,
-        len_test: int = 10000,
+        len_train: int = None,
+        len_test: int = None,
         expand_ratio: int = 8,
         diffuse_dirs=None,
         specular_dirs=None,
@@ -91,10 +91,10 @@ class TextureVerseDataset(BaseDataset):
         self.normal_view_dirs = normal_view_dirs or ["normal2", "normal3"]
 
         if split == "train":
-            self.len_train = len_train
+            requested_len = len_train
             split_pattern = "selected_uids_for_training*"
         elif split == "test":
-            self.len_train = len_test
+            requested_len = len_test
             split_pattern = "selected_uids_for_eval*"
         else:
             raise ValueError(f"Invalid split: {split}")
@@ -105,6 +105,11 @@ class TextureVerseDataset(BaseDataset):
             raise ValueError(
                 f"No valid TextureVerse sequences found under {self.TextureVerse_DIR} for split={split}"
             )
+
+        if requested_len is None or requested_len <= 0:
+            self.len_train = self.sequence_list_len
+        else:
+            self.len_train = requested_len
 
         status = "Training" if self.training else "Testing"
         logging.info(f"TextureVerse_DIR is {self.TextureVerse_DIR}")

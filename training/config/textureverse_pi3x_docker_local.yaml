@@ -58,7 +58,7 @@ data:
           split: train
           TextureVerse_DIR: /workspace/datasets/texture_verse_resolution1024
           min_num_images: 2
-          len_train: 100000
+          len_train: null
   val:
     _target_: data.dynamic_dataloader.DynamicTorchDataset
     num_workers: ${num_workers}
@@ -97,7 +97,7 @@ data:
           split: test
           TextureVerse_DIR: /workspace/datasets/texture_verse_resolution1024
           min_num_images: 2
-          len_test: 10000
+          len_test: null
 
 logging:
   log_dir: /workspace/runs/${exp_name}
