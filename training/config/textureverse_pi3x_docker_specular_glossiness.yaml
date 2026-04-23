@@ -1,6 +1,57 @@
 defaults:
-  - textureverse_pi3x_docker
+  - textureverse_pi3x_docker_local
   - _self_
 
+# Use this file for the specular/diffuse/glossiness baseline and prefer CLI overrides for
+# toggles such as GGX weights, batch sizing, or learning rate.
 exp_name: textureverse_pi3x_docker_specular_glossiness
 material_workflow: specular_diffuse_glossiness
+
+loss:
+  ggx:
+    render_weight: 0.1
+    grad_weight: 0.05
+    energy_weight: 0.02
+    metal_prior_weight: 0.02
+    b_scale: True
+    scales: 4
+    light_mode: view
+
+logging:
+  scalar_keys_to_log:
+    train:
+      keys_to_log:
+        - loss_objective
+        - loss_reg_albedo
+        - loss_grad_albedo
+        - loss_reg_diffuse
+        - loss_grad_diffuse
+        - loss_reg_specular
+        - loss_grad_specular
+        - loss_reg_glossiness
+        - loss_grad_glossiness
+        - loss_negcos_normal
+        - loss_reg_shading
+        - loss_grad_shading
+        - loss_reg_ggx_render
+        - loss_grad_ggx_render
+        - loss_energy_ggx
+        - loss_metal_diffuse_ggx
+    val:
+      keys_to_log:
+        - loss_objective
+        - loss_reg_albedo
+        - loss_grad_albedo
+        - loss_reg_diffuse
+        - loss_grad_diffuse
+        - loss_reg_specular
+        - loss_grad_specular
+        - loss_reg_glossiness
+        - loss_grad_glossiness
+        - loss_negcos_normal
+        - loss_reg_shading
+        - loss_grad_shading
+        - loss_reg_ggx_render
+        - loss_grad_ggx_render
+        - loss_energy_ggx
+        - loss_metal_diffuse_ggx

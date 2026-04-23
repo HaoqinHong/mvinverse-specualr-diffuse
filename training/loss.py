@@ -26,6 +26,7 @@ class MultitaskLoss(torch.nn.Module):
         diffuse=None,
         specular=None,
         glossiness=None,
+        ggx=None,
         material_workflow="metallic_roughness",
         **kwargs,
     ):
@@ -40,6 +41,7 @@ class MultitaskLoss(torch.nn.Module):
         self.diffuse = diffuse
         self.specular = specular
         self.glossiness = glossiness
+        self.ggx = ggx
         self.material_workflow = material_workflow
 
     def forward(self, predictions, batch) -> torch.Tensor:
@@ -124,6 +126,17 @@ class MultitaskLoss(torch.nn.Module):
                 self.glossiness["grad_weight"] * glossiness_loss_dict["loss_grad_glossiness"]
             total_loss = total_loss + glossiness_loss
             loss_dict.update(glossiness_loss_dict)
+
+        if self.ggx is not None:
+            ggx_loss_dict = compute_ggx_render_loss(predictions, batch, **self.ggx)
+            ggx_loss = (
+                self.ggx.get("render_weight", 1.0) * ggx_loss_dict["loss_reg_ggx_render"]
+                + self.ggx.get("grad_weight", 0.0) * ggx_loss_dict["loss_grad_ggx_render"]
+                + self.ggx.get("energy_weight", 0.0) * ggx_loss_dict["loss_energy_ggx"]
+                + self.ggx.get("metal_prior_weight", 0.0) * ggx_loss_dict["loss_metal_diffuse_ggx"]
+            )
+            total_loss = total_loss + ggx_loss
+            loss_dict.update(ggx_loss_dict)
 
         loss_dict["objective"] = total_loss
         return loss_dict
@@ -401,6 +414,182 @@ def compute_glossiness_loss(predictions, batch, **kwargs):
     return {
         "loss_reg_glossiness": loss_reg,
         "loss_grad_glossiness": loss_grad,
+    }
+
+
+def _safe_normalize(vec, eps=1e-6):
+    return F.normalize(torch.nan_to_num(vec, nan=0.0), p=2, dim=-1, eps=eps)
+
+
+def _compute_luminance(rgb):
+    weights = rgb.new_tensor([0.2126, 0.7152, 0.0722])
+    return torch.sum(rgb * weights, dim=-1, keepdim=True)
+
+
+def _ggx_distribution(n_dot_h, alpha):
+    alpha_sq = alpha * alpha
+    denom = (n_dot_h * n_dot_h) * (alpha_sq - 1.0) + 1.0
+    return alpha_sq / (torch.pi * denom * denom + 1e-6)
+
+
+def _schlick_ggx_visibility_term(n_dot_x, k):
+    return n_dot_x / (n_dot_x * (1.0 - k) + k + 1e-6)
+
+
+def _schlick_fresnel(f0, v_dot_h):
+    return f0 + (1.0 - f0) * torch.pow(1.0 - v_dot_h, 5.0)
+
+
+def build_view_directions_from_intrinsics(camera_intrinsics, height, width):
+    batch_size, num_views = camera_intrinsics.shape[:2]
+    device = camera_intrinsics.device
+    dtype = camera_intrinsics.dtype
+
+    u = torch.arange(width, device=device, dtype=dtype)
+    v = torch.arange(height, device=device, dtype=dtype)
+    grid_v, grid_u = torch.meshgrid(v, u, indexing="ij")
+    grid_u = grid_u.view(1, 1, height, width, 1)
+    grid_v = grid_v.view(1, 1, height, width, 1)
+
+    fx = camera_intrinsics[..., 0, 0].view(batch_size, num_views, 1, 1, 1)
+    fy = camera_intrinsics[..., 1, 1].view(batch_size, num_views, 1, 1, 1)
+    cx = camera_intrinsics[..., 0, 2].view(batch_size, num_views, 1, 1, 1)
+    cy = camera_intrinsics[..., 1, 2].view(batch_size, num_views, 1, 1, 1)
+
+    x = (grid_u - cx) / torch.clamp(fx, min=1e-6)
+    y = (grid_v - cy) / torch.clamp(fy, min=1e-6)
+    view = torch.cat([-x, -y, -torch.ones_like(x)], dim=-1)
+    return _safe_normalize(view)
+
+
+def render_proxy_ggx(diffuse, specular, glossiness, normal, view, light):
+    normal = _safe_normalize(normal)
+    view = _safe_normalize(view)
+    light = _safe_normalize(light)
+    half_vector = _safe_normalize(view + light)
+
+    n_dot_l = torch.clamp(torch.sum(normal * light, dim=-1, keepdim=True), min=0.0, max=1.0)
+    n_dot_v = torch.clamp(torch.sum(normal * view, dim=-1, keepdim=True), min=0.0, max=1.0)
+    n_dot_h = torch.clamp(torch.sum(normal * half_vector, dim=-1, keepdim=True), min=0.0, max=1.0)
+    v_dot_h = torch.clamp(torch.sum(view * half_vector, dim=-1, keepdim=True), min=0.0, max=1.0)
+
+    roughness = torch.clamp(1.0 - glossiness, min=0.04, max=1.0)
+    alpha = torch.clamp(roughness * roughness, min=0.001, max=1.0)
+    k = torch.clamp((roughness + 1.0) * (roughness + 1.0) / 8.0, min=1e-4, max=1.0)
+
+    distribution = _ggx_distribution(n_dot_h, alpha)
+    geometry = _schlick_ggx_visibility_term(n_dot_l, k) * _schlick_ggx_visibility_term(n_dot_v, k)
+    fresnel = _schlick_fresnel(torch.clamp(specular, 0.0, 1.0), v_dot_h)
+
+    diffuse_term = torch.clamp(diffuse, 0.0, 1.0) / torch.pi
+    specular_term = distribution * geometry * fresnel / torch.clamp(4.0 * n_dot_l * n_dot_v, min=1e-4)
+    return (diffuse_term + specular_term) * n_dot_l
+
+
+def compute_ggx_render_loss(predictions, batch, **kwargs):
+    required_prediction_keys = ("diffuse", "specular", "glossiness")
+    if any(key not in predictions for key in required_prediction_keys) or "shading" not in batch:
+        reference_tensor = predictions.get("diffuse", None)
+        if reference_tensor is None:
+            reference_tensor = predictions.get("normal", None)
+        if reference_tensor is None:
+            reference_tensor = next(iter(predictions.values()))
+        dummy_loss = (0.0 * reference_tensor).mean()
+        return {
+            "loss_reg_ggx_render": dummy_loss,
+            "loss_grad_ggx_render": dummy_loss,
+            "loss_energy_ggx": dummy_loss,
+            "loss_metal_diffuse_ggx": dummy_loss,
+        }
+
+    pred_diffuse = predictions["diffuse"]
+    pred_specular = predictions["specular"]
+    pred_glossiness = predictions["glossiness"]
+    pred_normal = predictions.get("normal")
+
+    gt_shading = batch["shading"].permute(0, 1, 3, 4, 2).contiguous()
+    render_mask = batch.get("mask_shading", batch.get("mask_diffuse"))
+    if render_mask is None:
+        render_mask = torch.ones_like(gt_shading[..., 0], dtype=torch.bool)
+
+    if render_mask.sum() < 100:
+        dummy_loss = (0.0 * pred_diffuse).mean()
+        return {
+            "loss_reg_ggx_render": dummy_loss,
+            "loss_grad_ggx_render": dummy_loss,
+            "loss_energy_ggx": dummy_loss,
+            "loss_metal_diffuse_ggx": dummy_loss,
+        }
+
+    if "view" in batch:
+        gt_view = batch["view"].permute(0, 1, 3, 4, 2).contiguous()
+        gt_view = _safe_normalize(gt_view)
+    elif "camera_intrinsics" in batch:
+        height, width = gt_shading.shape[2:4]
+        gt_view = build_view_directions_from_intrinsics(batch["camera_intrinsics"], height, width)
+    else:
+        dummy_loss = (0.0 * pred_diffuse).mean()
+        return {
+            "loss_reg_ggx_render": dummy_loss,
+            "loss_grad_ggx_render": dummy_loss,
+            "loss_energy_ggx": dummy_loss,
+            "loss_metal_diffuse_ggx": dummy_loss,
+        }
+
+    if "normal_view" in batch:
+        render_normal = batch["normal_view"].permute(0, 1, 3, 4, 2).contiguous()
+        render_normal = _safe_normalize(render_normal)
+    elif pred_normal is not None:
+        render_normal = _safe_normalize(pred_normal)
+    else:
+        dummy_loss = (0.0 * pred_diffuse).mean()
+        return {
+            "loss_reg_ggx_render": dummy_loss,
+            "loss_grad_ggx_render": dummy_loss,
+            "loss_energy_ggx": dummy_loss,
+            "loss_metal_diffuse_ggx": dummy_loss,
+        }
+
+    light_mode = kwargs.get("light_mode", "view")
+    if light_mode == "view":
+        light = gt_view
+    elif light_mode == "normal":
+        light = render_normal
+    else:
+        raise ValueError(f"Unsupported GGX light_mode: {light_mode}")
+
+    rendered = render_proxy_ggx(
+        pred_diffuse,
+        pred_specular,
+        pred_glossiness,
+        render_normal,
+        gt_view,
+        light,
+    )
+
+    scales = kwargs["scales"] if "scales" in kwargs else 4
+    b_scale = kwargs["b_scale"] if "b_scale" in kwargs else True
+    loss_reg, loss_grad = material_regression_loss(
+        rendered,
+        gt_shading,
+        render_mask,
+        b_scale=b_scale,
+        scales=scales,
+    )
+
+    energy = torch.clamp(pred_diffuse + pred_specular - 1.0, min=0.0)
+    loss_energy = energy[render_mask].mean()
+
+    specular_luma = torch.clamp(_compute_luminance(pred_specular), 0.0, 1.0)
+    metal_proxy = torch.clamp((specular_luma - 0.08) / 0.92, min=0.0, max=1.0)
+    diffuse_luma = _compute_luminance(torch.clamp(pred_diffuse, 0.0, 1.0))
+    loss_metal_diffuse = (diffuse_luma[render_mask] * metal_proxy[render_mask]).mean()
+
+    return {
+        "loss_reg_ggx_render": loss_reg,
+        "loss_grad_ggx_render": loss_grad,
+        "loss_energy_ggx": loss_energy,
+        "loss_metal_diffuse_ggx": loss_metal_diffuse,
     }
 
 def compute_scale(pred, gt, mask, eps=1e-5):

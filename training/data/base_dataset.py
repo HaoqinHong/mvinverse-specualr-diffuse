@@ -137,6 +137,8 @@ class BaseDataset(Dataset):
         specular=None,
         glossiness=None,
         normal=None,
+        normal_view=None,
+        view=None,
         shading=None,
         mask_albedo=None,
         mask_metallic=None,
@@ -221,7 +223,7 @@ class BaseDataset(Dataset):
 
         # all maps to process
         maps_to_process = [
-            image, albedo, metallic, roughness, diffuse, specular, glossiness, normal, shading,
+            image, albedo, metallic, roughness, diffuse, specular, glossiness, normal, normal_view, view, shading,
             mask_albedo, mask_metallic, mask_roughness, mask_diffuse, mask_specular, mask_glossiness, mask_normal, mask_shading,
         ]
         

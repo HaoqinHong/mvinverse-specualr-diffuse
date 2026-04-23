@@ -19,10 +19,10 @@ def main():
         default="default",
         help="Name of the config file (without .yaml extension, default: default)"
     )
-    args = parser.parse_args()
+    args, overrides = parser.parse_known_args()
 
     with initialize(version_base=None, config_path="config"):
-        cfg = compose(config_name=args.config)
+        cfg = compose(config_name=args.config, overrides=overrides)
 
     # save config
     safe_makedirs(cfg.logging.log_dir)

@@ -1,0 +1,247 @@
+defaults:
+  - default_dataset.yaml
+  - _self_
+
+# Keep stable local defaults here and override experiment-specific knobs from CLI, e.g.
+# `-ConfigOverrides "max_img_per_gpu=2" "optim.optimizer.lr=1e-4" "loss.ggx=null"`.
+exp_name: textureverse_pi3x_docker_baseline
+material_workflow: metallic_roughness
+img_size: 448
+num_workers: 0
+seed_value: 42
+accum_steps: 1
+patch_size: 14
+val_epoch_freq: 1
+max_img_per_gpu: 2
+
+limit_train_batches: 1000
+limit_val_batches: 10
+
+data:
+  train:
+    _target_: data.dynamic_dataloader.DynamicTorchDataset
+    num_workers: ${num_workers}
+    shuffle: True
+    pin_memory: False
+    max_img_per_gpu: ${max_img_per_gpu}
+    common_config:
+      fix_img_num: -1
+      fix_aspect_ratio: 1.0
+      load_track: False
+      track_num: 1024
+      training: True
+      inside_random: True
+      img_size: ${img_size}
+      patch_size: ${patch_size}
+      rescale: True
+      rescale_aug: False
+      landscape_check: False
+      debug: False
+      get_nearby: True
+      load_depth: False
+      img_nums: [2, 2]
+      max_img_per_gpu: ${max_img_per_gpu}
+      allow_duplicate_img: False
+      repeat_batch: False
+      augs:
+        cojitter: False
+        cojitter_ratio: 0.0
+        scales: [1.0, 1.0]
+        aspects: [1.0, 1.0]
+        color_jitter: null
+        gray_scale: False
+        gau_blur: False
+    dataset:
+      _target_: data.composed_intrinsic_dataset.ComposedIntrinsicDataset
+      dataset_configs:
+        - _target_: data.datasets.textureverse.TextureVerseDataset
+          split: train
+          TextureVerse_DIR: /workspace/datasets/texture_verse_resolution1024
+          min_num_images: 2
+          len_train: 100000
+  val:
+    _target_: data.dynamic_dataloader.DynamicTorchDataset
+    num_workers: ${num_workers}
+    shuffle: False
+    pin_memory: False
+    max_img_per_gpu: ${max_img_per_gpu}
+    common_config:
+      fix_img_num: -1
+      fix_aspect_ratio: 1.0
+      load_track: False
+      track_num: 1024
+      training: False
+      inside_random: False
+      img_size: ${img_size}
+      patch_size: ${patch_size}
+      rescale: True
+      rescale_aug: False
+      landscape_check: False
+      debug: False
+      get_nearby: True
+      load_depth: False
+      img_nums: [2, 2]
+      allow_duplicate_img: False
+      augs:
+        cojitter: False
+        cojitter_ratio: 0.0
+        scales: null
+        aspects: [1.0, 1.0]
+        color_jitter: null
+        gray_scale: False
+        gau_blur: False
+    dataset:
+      _target_: data.composed_intrinsic_dataset.ComposedIntrinsicDataset
+      dataset_configs:
+        - _target_: data.datasets.textureverse.TextureVerseDataset
+          split: test
+          TextureVerse_DIR: /workspace/datasets/texture_verse_resolution1024
+          min_num_images: 2
+          len_test: 10000
+
+logging:
+  log_dir: /workspace/runs/${exp_name}
+  log_visuals: False
+  log_freq: 1
+  log_level_primary: INFO
+  log_level_secondary: WARNING
+  all_ranks: False
+  tensorboard_writer:
+    _target_: train_utils.tb_writer.TensorBoardLogger
+    path: ${logging.log_dir}/tensorboard
+  scalar_keys_to_log:
+    train:
+      keys_to_log:
+        - loss_objective
+        - loss_reg_albedo
+        - loss_grad_albedo
+        - loss_reg_metallic
+        - loss_grad_metallic
+        - loss_reg_roughness
+        - loss_grad_roughness
+        - loss_reg_diffuse
+        - loss_grad_diffuse
+        - loss_reg_specular
+        - loss_grad_specular
+        - loss_reg_glossiness
+        - loss_grad_glossiness
+        - loss_negcos_normal
+        - loss_reg_shading
+        - loss_grad_shading
+    val:
+      keys_to_log:
+        - loss_objective
+        - loss_reg_albedo
+        - loss_grad_albedo
+        - loss_reg_metallic
+        - loss_grad_metallic
+        - loss_reg_roughness
+        - loss_grad_roughness
+        - loss_reg_diffuse
+        - loss_grad_diffuse
+        - loss_reg_specular
+        - loss_grad_specular
+        - loss_reg_glossiness
+        - loss_grad_glossiness
+        - loss_negcos_normal
+        - loss_reg_shading
+        - loss_grad_shading
+
+checkpoint:
+  save_dir: ${logging.log_dir}/ckpts
+  val_dir: ${logging.log_dir}/vals
+  save_freq: 5
+  resume_checkpoint_path: /workspace/models/Pi3X/model.safetensors
+  strict: False
+
+loss:
+  _target_: loss.MultitaskLoss
+  material_workflow: ${material_workflow}
+  albedo:
+    reg_weight: 1.0
+    grad_weight: 1.0
+  metallic:
+    reg_weight: 1.0
+    grad_weight: 1.0
+  roughness:
+    reg_weight: 1.0
+    grad_weight: 1.0
+  diffuse:
+    reg_weight: 1.0
+    grad_weight: 1.0
+  specular:
+    reg_weight: 1.0
+    grad_weight: 1.0
+  glossiness:
+    reg_weight: 1.0
+    grad_weight: 1.0
+  normal:
+    weight: 1.0
+  shading:
+    reg_weight: 1.0
+    grad_weight: 1.0
+
+optim:
+  param_group_modifiers: False
+  optimizer:
+    _target_: torch.optim.AdamW
+    lr: 5e-5
+    weight_decay: 0.05
+  frozen_module_names:
+    - "encoder"
+  freeze_register: False
+  amp:
+    enabled: True
+    amp_dtype: bfloat16
+  gradient_clip:
+    _target_: train_utils.gradient_clip.GradientClipper
+    configs:
+      - module_name: ["encoder"]
+        max_norm: 1.0
+        norm_type: 2
+      - module_name: ["decoder"]
+        max_norm: 1.0
+        norm_type: 2
+      - module_name: ["head"]
+        max_norm: 1.0
+        norm_type: 2
+      - module_name: ["register_token"]
+        max_norm: 1.0
+        norm_type: 2
+  options:
+    lr:
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.CompositeParamScheduler
+          schedulers:
+            - _target_: fvcore.common.param_scheduler.LinearParamScheduler
+              start_value: 1e-8
+              end_value: 5e-5
+            - _target_: fvcore.common.param_scheduler.CosineParamScheduler
+              start_value: 5e-5
+              end_value: 1e-8
+          lengths: [0.05, 0.95]
+          interval_scaling: ['rescaled', 'rescaled']
+    weight_decay:
+      - scheduler:
+          _target_: fvcore.common.param_scheduler.ConstantParamScheduler
+          value: 0.05
+
+max_epochs: 50
+
+model:
+  _target_: mvinverse.models.mvinverse.MVInverse
+  material_workflow: ${material_workflow}
+
+distributed:
+  backend: gloo
+  comms_dtype: None
+  find_unused_parameters: False
+  timeout_mins: 30
+  gradient_as_bucket_view: True
+  bucket_cap_mb: 25
+  broadcast_buffers: True
+
+cuda:
+  cudnn_deterministic: False
+  cudnn_benchmark: False
+  allow_tf32: True

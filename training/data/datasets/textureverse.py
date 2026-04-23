@@ -1,4 +1,5 @@
 import glob
+import json
 import logging
 import os
 import os.path as osp
@@ -24,12 +25,30 @@ def _read_image_float(path, flags=cv2.IMREAD_UNCHANGED):
     return img
 
 
-def _find_existing_filepath(seq_dir, folder_candidates, filename):
+def _find_existing_filepath(seq_dir, folder_candidates, filename, allow_stem_match=False):
     for folder in folder_candidates:
         path = osp.join(seq_dir, folder, filename)
         if osp.exists(path):
             return path
+        if allow_stem_match:
+            stem, _ = osp.splitext(filename)
+            pattern = osp.join(seq_dir, folder, stem + ".*")
+            matches = sorted(glob.glob(pattern))
+            if len(matches) > 0:
+                return matches[0]
     return None
+
+
+def _load_camera_metadata(seq_dir):
+    camera_meta_path = osp.join(seq_dir, "camera_meta.json")
+    if not osp.exists(camera_meta_path):
+        return {}
+
+    with open(camera_meta_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    cameras = payload.get("cameras", [])
+    return {camera["image_name"]: camera for camera in cameras}
 
 
 class TextureVerseDataset(BaseDataset):
@@ -46,6 +65,8 @@ class TextureVerseDataset(BaseDataset):
         diffuse_dirs=None,
         specular_dirs=None,
         glossiness_dirs=None,
+        view_dirs=None,
+        normal_view_dirs=None,
     ):
         if common_conf is None:
             common_conf = common_config
@@ -66,6 +87,8 @@ class TextureVerseDataset(BaseDataset):
         self.diffuse_dirs = diffuse_dirs or ["diffuse", "diffuser", "diffusecolor"]
         self.specular_dirs = specular_dirs or ["specular", "specularcolor"]
         self.glossiness_dirs = glossiness_dirs or ["glossiness", "gloss", "smoothness"]
+        self.view_dirs = view_dirs or ["view"]
+        self.normal_view_dirs = normal_view_dirs or ["normal2", "normal3"]
 
         if split == "train":
             self.len_train = len_train
@@ -147,7 +170,13 @@ class TextureVerseDataset(BaseDataset):
         specular_list = []
         glossiness_list = []
         normal_list = []
+        normal_view_list = []
+        view_list = []
         shading_list = []
+        camera_intrinsics_list = []
+        camera_c2w_list = []
+        camera_w2c_list = []
+        camera_position_list = []
         mask_albedo_list = []
         mask_metallic_list = []
         mask_roughness_list = []
@@ -156,6 +185,8 @@ class TextureVerseDataset(BaseDataset):
         mask_glossiness_list = []
         mask_normal_list = []
         mask_shading_list = []
+
+        camera_meta_by_name = _load_camera_metadata(seq_dir)
 
         for image_idx in ids:
             filename = osp.basename(frame_paths[image_idx])
@@ -167,6 +198,12 @@ class TextureVerseDataset(BaseDataset):
             specular_filepath = _find_existing_filepath(seq_dir, self.specular_dirs, filename)
             glossiness_filepath = _find_existing_filepath(seq_dir, self.glossiness_dirs, filename)
             normal_filepath = osp.join(seq_dir, "normal_png", filename)
+            normal_view_filepath = _find_existing_filepath(
+                seq_dir, self.normal_view_dirs, filename, allow_stem_match=True
+            )
+            view_filepath = _find_existing_filepath(
+                seq_dir, self.view_dirs, filename, allow_stem_match=True
+            )
 
             image = _read_image_float(image_filepath)
             albedo = _read_image_float(albedo_filepath)
@@ -179,7 +216,27 @@ class TextureVerseDataset(BaseDataset):
             normal = normal * 2.0 - 1.0
             eps = 1e-10
             normal = normal / (np.linalg.norm(normal, axis=2, keepdims=True) + eps)
+            normal_view = _read_image_float(normal_view_filepath) if normal_view_filepath is not None else None
+            if normal_view is not None:
+                normal_view = normal_view * 2.0 - 1.0
+                normal_view = normal_view / (np.linalg.norm(normal_view, axis=2, keepdims=True) + eps)
+            view = _read_image_float(view_filepath) if view_filepath is not None else None
+            if view is not None:
+                view = np.nan_to_num(view, nan=0.0)
+                view = view / (np.linalg.norm(view, axis=2, keepdims=True) + eps)
             shading = image.copy()
+
+            camera_meta = camera_meta_by_name.get(filename)
+            if camera_meta is not None:
+                camera_intrinsics = np.asarray(camera_meta["intrinsics"]["K"], dtype=np.float32)
+                camera_c2w = np.asarray(camera_meta["extrinsics"]["c2w"], dtype=np.float32)
+                camera_w2c = np.asarray(camera_meta["extrinsics"]["w2c"], dtype=np.float32)
+                camera_position = camera_c2w[:3, 3].astype(np.float32)
+            else:
+                camera_intrinsics = None
+                camera_c2w = None
+                camera_w2c = None
+                camera_position = None
 
             original_size = np.array(image.shape[:2])
 
@@ -203,6 +260,8 @@ class TextureVerseDataset(BaseDataset):
                 specular,
                 glossiness,
                 normal,
+                normal_view,
+                view,
                 shading,
                 mask_albedo,
                 mask_metallic,
@@ -221,6 +280,8 @@ class TextureVerseDataset(BaseDataset):
                 specular=specular,
                 glossiness=glossiness,
                 normal=normal,
+                normal_view=normal_view,
+                view=view,
                 shading=shading,
                 mask_albedo=mask_albedo,
                 mask_metallic=mask_metallic,
@@ -242,7 +303,13 @@ class TextureVerseDataset(BaseDataset):
             specular_list.append(specular)
             glossiness_list.append(glossiness)
             normal_list.append(normal)
+            normal_view_list.append(normal_view)
+            view_list.append(view)
             shading_list.append(shading)
+            camera_intrinsics_list.append(camera_intrinsics)
+            camera_c2w_list.append(camera_c2w)
+            camera_w2c_list.append(camera_w2c)
+            camera_position_list.append(camera_position)
 
             mask_albedo_list.append(mask_albedo)
             mask_metallic_list.append(mask_metallic)
@@ -266,7 +333,13 @@ class TextureVerseDataset(BaseDataset):
             "specular": specular_list,
             "glossiness": glossiness_list,
             "normal": normal_list,
+            "normal_view": normal_view_list,
+            "view": view_list,
             "shading": shading_list,
+            "camera_intrinsics": camera_intrinsics_list,
+            "camera_c2w": camera_c2w_list,
+            "camera_w2c": camera_w2c_list,
+            "camera_position": camera_position_list,
             "mask_albedo": mask_albedo_list,
             "mask_metallic": mask_metallic_list,
             "mask_roughness": mask_roughness_list,

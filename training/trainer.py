@@ -433,10 +433,11 @@ class Trainer:
             return self.logging_conf.scalar_keys_to_log[phase].keys_to_log
         return []
 
-    def _compute_validation_psnr(self, predictions: Mapping, batch: Mapping) -> Optional[torch.Tensor]:
+    def _compute_validation_psnr_metrics(self, predictions: Mapping, batch: Mapping) -> Dict[str, torch.Tensor]:
         """
-        Compute a mean PSNR over all available material properties in the validation batch.
+        Compute per-property PSNR and an overall mean PSNR over all available material properties.
         """
+        psnr_metrics = {}
         psnr_values = []
         prop_names = ["albedo", "metallic", "roughness", "diffuse", "specular", "glossiness", "normal", "shading"]
 
@@ -458,12 +459,14 @@ class Trainer:
 
             psnr = compute_masked_psnr(pred, target, mask)
             if psnr is not None and torch.isfinite(psnr):
+                psnr_metrics[f"psnr_{prop_name}"] = psnr
                 psnr_values.append(psnr)
 
         if not psnr_values:
-            return None
+            return {}
 
-        return torch.stack(psnr_values).mean()
+        psnr_metrics["psnr"] = torch.stack(psnr_values).mean()
+        return psnr_metrics
 
     def _maybe_save_best_checkpoint(self, val_metrics: Optional[Dict[str, float]]) -> None:
         """
@@ -547,6 +550,10 @@ class Trainer:
         data_time = AverageMeter("Data Time", self.device, ":.4f")
         mem = AverageMeter("Mem (GB)", self.device, ":.4f")
         psnr_meter = AverageMeter("PSNR", self.device, ":.4f")
+        psnr_prop_names = ["albedo", "metallic", "roughness", "diffuse", "specular", "glossiness", "normal", "shading"]
+        psnr_prop_meters = {
+            f"psnr_{name}": AverageMeter(f"PSNR/{name}", self.device, ":.4f") for name in psnr_prop_names
+        }
         phase = 'val'
         
         loss_names = self._get_scalar_log_keys(phase)
@@ -562,6 +569,7 @@ class Trainer:
                 data_time,
                 mem,
                 psnr_meter,
+                *psnr_prop_meters.values(),
                 self.time_elapsed_meter,
                 *loss_meters.values(),
             ],
@@ -600,11 +608,18 @@ class Trainer:
             ):
                 val_predictions = self._val_step(batch, self.model, phase, loss_meters)
 
-            batch_psnr = self._compute_validation_psnr(val_predictions, batch)
-            if batch_psnr is not None:
-                psnr_meter.update(batch_psnr.item(), batch["images"].shape[0])
+            batch_psnr_metrics = self._compute_validation_psnr_metrics(val_predictions, batch)
+            if "psnr" in batch_psnr_metrics:
+                psnr_meter.update(batch_psnr_metrics["psnr"].item(), batch["images"].shape[0])
                 if self.rank == 0 and self.steps[phase] % self.logging_conf.log_freq == 0:
-                    self.tb_writer.log("Metrics/val/psnr", batch_psnr.item(), self.steps[phase])
+                    self.tb_writer.log("Metrics/val/psnr", batch_psnr_metrics["psnr"].item(), self.steps[phase])
+
+            for metric_name, metric_value in batch_psnr_metrics.items():
+                if metric_name == "psnr":
+                    continue
+                psnr_prop_meters[metric_name].update(metric_value.item(), batch["images"].shape[0])
+                if self.rank == 0 and self.steps[phase] % self.logging_conf.log_freq == 0:
+                    self.tb_writer.log(f"Metrics/val/{metric_name}", metric_value.item(), self.steps[phase])
 
             # 这里会把输入图、GT、预测结果、mask 全部保存成 PNG。
             # 对材质任务非常有用，因为很多时候“看图”比只看 loss 更快发现问题。
@@ -665,6 +680,25 @@ class Trainer:
             val_metrics["psnr"] = psnr_meter.avg
             if self.rank == 0:
                 logging.info(f"Validation PSNR: {psnr_meter.avg:.4f} dB")
+
+        for metric_name, meter in psnr_prop_meters.items():
+            if meter.count > 0:
+                val_metrics[metric_name] = meter.avg
+
+        if self.rank == 0:
+            if val_metrics:
+                metrics_path = os.path.join(epoch_val_dir, "metrics.json")
+                with open(metrics_path, "w", encoding="utf-8") as f:
+                    json.dump(val_metrics, f, indent=2)
+
+                per_prop_summary = ", ".join(
+                    f"{name}={value:.4f}"
+                    for name, value in val_metrics.items()
+                    if name.startswith("psnr_")
+                )
+                logging.info(f"Validation outputs saved to {epoch_val_dir}")
+                if per_prop_summary:
+                    logging.info(f"Validation per-property PSNR: {per_prop_summary}")
 
         return val_metrics
 

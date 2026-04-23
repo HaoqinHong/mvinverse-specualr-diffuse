@@ -174,6 +174,8 @@ class InteriorverseDataset(BaseDataset):
                 _,
                 _,
                 normal,
+                _,
+                _,
                 shading,
                 mask_albedo,
                 mask_metallic,

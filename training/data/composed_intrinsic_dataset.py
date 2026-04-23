@@ -159,7 +159,12 @@ class ComposedIntrinsicDataset(Dataset, ABC):
         seq_name = batch["seq_name"]
 
         def _to_chw_tensor(key, channel_last=True):
-            if key not in batch or batch[key] is None or len(batch[key]) == 0 or batch[key][0] is None:
+            if (
+                key not in batch
+                or batch[key] is None
+                or len(batch[key]) == 0
+                or any(item is None for item in batch[key])
+            ):
                 return None
             tensor = torch.from_numpy(np.stack(batch[key]).astype(np.float32)).contiguous()
             if channel_last:
@@ -167,7 +172,12 @@ class ComposedIntrinsicDataset(Dataset, ABC):
             return tensor.to(torch.get_default_dtype())
 
         def _to_mask_tensor(key):
-            if key not in batch or batch[key] is None or len(batch[key]) == 0 or batch[key][0] is None:
+            if (
+                key not in batch
+                or batch[key] is None
+                or len(batch[key]) == 0
+                or any(item is None for item in batch[key])
+            ):
                 return None
             return torch.from_numpy(np.stack(batch[key]).astype(bool)).contiguous()
 
@@ -189,9 +199,15 @@ class ComposedIntrinsicDataset(Dataset, ABC):
         glossiness = _to_chw_tensor("glossiness")
         mask_glossiness = _to_mask_tensor("mask_glossiness")
         normal = _to_chw_tensor("normal")
+        normal_view = _to_chw_tensor("normal_view")
         mask_normal = _to_mask_tensor("mask_normal")
+        view = _to_chw_tensor("view")
         shading = _to_chw_tensor("shading")
         mask_shading = _to_mask_tensor("mask_shading")
+        camera_intrinsics = _to_chw_tensor("camera_intrinsics", channel_last=False)
+        camera_c2w = _to_chw_tensor("camera_c2w", channel_last=False)
+        camera_w2c = _to_chw_tensor("camera_w2c", channel_last=False)
+        camera_position = _to_chw_tensor("camera_position", channel_last=False)
 
         ids = torch.from_numpy(batch["ids"])    # Frame indices sampled from the original sequence
 
@@ -207,7 +223,13 @@ class ComposedIntrinsicDataset(Dataset, ABC):
             "specular": specular,
             "glossiness": glossiness,
             "normal": normal,
+            "normal_view": normal_view,
+            "view": view,
             "shading": shading,
+            "camera_intrinsics": camera_intrinsics,
+            "camera_c2w": camera_c2w,
+            "camera_w2c": camera_w2c,
+            "camera_position": camera_position,
             "mask_albedo": mask_albedo,
             "mask_metallic": mask_metallic,
             "mask_roughness": mask_roughness,
