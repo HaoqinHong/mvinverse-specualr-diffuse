@@ -13,7 +13,7 @@ val_epoch_freq: 1
 max_img_per_gpu: 6
 
 limit_train_batches: null
-limit_val_batches: 10
+limit_val_batches: 20
 
 data:
   train:
@@ -98,7 +98,7 @@ data:
           len_test: 10000
 
 logging:
-  log_dir: /workspace/runs/${exp_name}
+  log_dir: /home/project/output/runs/${exp_name}
   log_visuals: False
   log_freq: 1
   log_level_primary: INFO
